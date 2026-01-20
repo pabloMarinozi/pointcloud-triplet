@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.vscode/
+
+runs/
+*.pt
+*.pth
+*.npz
+
+.DS_Store
+Thumbs.db
