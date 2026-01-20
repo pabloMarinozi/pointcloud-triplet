@@ -23,7 +23,7 @@ Este proyecto implementa una arquitectura tipo **PointNet** con transformaciones
 
 ### 1) CPN (Cloud Processing Network)
 
-[CPN.png](https://postimg.cc/ftdFyMpF)
+[![CPN.png](https://i.postimg.cc/sXHRnXcV/CPN.png)](https://postimg.cc/ftdFyMpF)
 
 El backbone **CPN** recibe una nube de puntos `X ∈ R^{3×N}` y produce un embedding `z ∈ R^{D}`:
 
