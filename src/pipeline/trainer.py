@@ -1,0 +1,321 @@
+from __future__ import annotations
+
+import csv
+import json
+import os
+from collections import defaultdict
+from datetime import datetime
+from typing import Dict, List, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
+
+from src.data.dataset import TripletPointCloudDataset, normalize_unit_sphere, to_numpy, augment, sample_n
+from src.models.triplet import triplet_loss_squared
+
+
+def _get_embedding_from_model(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    if hasattr(model, "encode"):
+        return model.encode(x)
+    if hasattr(model, "forward_once"):
+        return model.forward_once(x)
+    za, _, _ = model(x, x, x)
+    return za
+
+
+def compute_reference_embeddings_pointclouds(
+    model: nn.Module,
+    all_point_clouds,
+    device: torch.device,
+    n_points: int,
+    samples_per_class: int = 5,
+    use_augmentation: bool = False,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, List[str]]]:
+    model.eval()
+    reference_embeddings: Dict[str, np.ndarray] = {}
+    reference_paths: Dict[str, List[str]] = {}
+
+    class_to_indices = defaultdict(list)
+    for idx, (folder, _, _) in enumerate(all_point_clouds):
+        class_to_indices[folder].append(idx)
+
+    with torch.no_grad():
+        for cls, indices in class_to_indices.items():
+            if len(indices) == 0:
+                continue
+
+            indices = np.array(indices)
+            np.random.shuffle(indices)
+            selected_indices = indices[: min(samples_per_class, len(indices))]
+
+            embs = []
+            paths = []
+
+            for idx in selected_indices:
+                folder, path, cloud = all_point_clouds[int(idx)]
+                paths.append(path)
+
+                pts = normalize_unit_sphere(to_numpy(cloud)).astype(np.float32)
+                pts_proc = augment(pts, n_points) if use_augmentation else sample_n(pts, n_points)
+
+                pc_tensor = torch.from_numpy(pts_proc.T).unsqueeze(0).float().to(device)
+
+                emb = _get_embedding_from_model(model, pc_tensor)
+                emb = emb.detach().cpu().numpy()
+
+                if emb.ndim == 2 and emb.shape[0] == 1:
+                    emb = emb[0]
+
+                embs.append(emb)
+
+            if embs:
+                embs_arr = np.vstack(embs)
+                reference_embeddings[cls] = embs_arr.mean(axis=0)
+                reference_paths[cls] = paths
+
+    return reference_embeddings, reference_paths
+
+
+class TripletTrainingPipeline:
+    """
+    Pipeline de entrenamiento y logging (idéntico a Colab, pero a disco local).
+    """
+
+    def __init__(
+        self,
+        all_point_clouds,
+        model_class,
+        n_points: int,
+        width: int,
+        batch_size: int,
+        lr: float,
+        margin: float,
+        epochs: int,
+        clip_norm: float,
+        seed: int,
+        device: torch.device,
+        runs_dir: str = "runs",
+        val_size: float = 0.2,
+    ):
+        self.start_time = datetime.now()
+        timestamp = self.start_time.strftime("run_%Y-%m-%d_%H-%M-%S")
+
+        self.exp_dir = os.path.join(runs_dir, timestamp)
+        os.makedirs(self.exp_dir, exist_ok=True)
+
+        self.config_path = os.path.join(self.exp_dir, "config.json")
+        self.log_path = os.path.join(self.exp_dir, "training.log")
+        self.csv_path = os.path.join(self.exp_dir, "metrics.csv")
+        self.best_model_path = os.path.join(self.exp_dir, "model_best.pt")
+        self.ref_emb_path = os.path.join(self.exp_dir, "reference_embeddings_train.npz")
+        self.ref_paths_path = os.path.join(self.exp_dir, "reference_paths_train.json")
+
+        self.splits_dir = os.path.join(self.exp_dir, "splits")
+        os.makedirs(self.splits_dir, exist_ok=True)
+        self.train_split_path = os.path.join(self.splits_dir, "train_paths.json")
+        self.val_split_path = os.path.join(self.splits_dir, "val_paths.json")
+
+        self.n_points = n_points
+        self.ref_samples_per_class = 5
+        self.ref_use_augmentation = False
+
+        config = {
+            "start_datetime": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "n_points": n_points,
+            "width": width,
+            "batch_size": batch_size,
+            "lr": lr,
+            "margin": margin,
+            "epochs": epochs,
+            "clip_norm": clip_norm,
+            "seed": seed,
+            "device": str(device),
+            "total_clouds": len(all_point_clouds),
+            "ref_samples_per_class": self.ref_samples_per_class,
+            "ref_use_augmentation": self.ref_use_augmentation,
+        }
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+
+        self._log(f"Experiment directory: {self.exp_dir}", console=True)
+        self._log(f"Start time: {config['start_datetime']}", console=True)
+        self._log(f"Using n_points = {n_points}", console=True)
+        self._log(f"Using width    = {width}", console=True)
+
+        # -----------------------------
+        # DATASET SPLIT (estratificado por carpeta)
+        # -----------------------------
+        folders = sorted(list(set(f for f, _, _ in all_point_clouds)))
+
+        train_clouds, val_clouds = [], []
+        for folder in folders:
+            class_clouds = [x for x in all_point_clouds if x[0] == folder]
+            tr, va = train_test_split(class_clouds, test_size=val_size, random_state=seed)
+            train_clouds.extend(tr)
+            val_clouds.extend(va)
+
+        self.train_clouds = train_clouds
+        self.val_clouds = val_clouds
+
+        train_paths = [p for _, p, _ in self.train_clouds]
+        val_paths = [p for _, p, _ in self.val_clouds]
+
+        with open(self.train_split_path, "w", encoding="utf-8") as f:
+            json.dump(train_paths, f, indent=4)
+        with open(self.val_split_path, "w", encoding="utf-8") as f:
+            json.dump(val_paths, f, indent=4)
+
+        self._log(f"Saved train split to {self.train_split_path}", console=True)
+        self._log(f"Saved val split   to {self.val_split_path}", console=True)
+        self._log(f"Train clouds: {len(train_clouds)}", console=True)
+        self._log(f"Val clouds:   {len(val_clouds)}", console=True)
+        self._log(f"Classes:      {len(folders)}", console=True)
+
+        # -----------------------------
+        # DATALOADERS
+        # -----------------------------
+        self.train_ds = TripletPointCloudDataset(self.train_clouds, n_points=n_points, train=True)
+        self.val_ds = TripletPointCloudDataset(self.val_clouds, n_points=n_points, train=False)
+
+        self.train_loader = DataLoader(
+            self.train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=2,
+            pin_memory=True,
+            drop_last=True,
+        )
+        self.val_loader = DataLoader(
+            self.val_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True,
+            drop_last=False,
+        )
+
+        # -----------------------------
+        # MODEL
+        # -----------------------------
+        self.model = model_class(width=width).to(device)
+        params = sum(p.numel() for p in self.model.parameters())
+        self._log(f"Model parameters: {params}", console=True)
+
+        # CSV header
+        with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch", "train_loss", "val_loss", "lr"])
+
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=lr)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs)
+
+        self.device = device
+        self.margin = margin
+        self.epochs = epochs
+        self.clip_norm = clip_norm
+        self.best_val = float("inf")
+
+        self.scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
+
+    def _log(self, text: str, console: bool = False) -> None:
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+        if console:
+            print(text)
+
+    def train(self):
+        for epoch in range(1, self.epochs + 1):
+            # ----- TRAIN -----
+            self.model.train()
+            train_loss, train_count = 0.0, 0
+
+            for pa, pp, pn in self.train_loader:
+                pa, pp, pn = pa.to(self.device), pp.to(self.device), pn.to(self.device)
+                self.optimizer.zero_grad(set_to_none=True)
+
+                with torch.amp.autocast("cuda" if self.device.type == "cuda" else "cpu"):
+                    za, zp, zn = self.model(pa, pp, pn)
+                    loss = triplet_loss_squared(za, zp, zn, margin=self.margin)
+
+                if self.scaler:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
+                    self.optimizer.step()
+
+                train_loss += loss.item() * pa.size(0)
+                train_count += pa.size(0)
+
+            train_loss /= train_count
+
+            # ----- VAL -----
+            self.model.eval()
+            val_loss, val_count = 0.0, 0
+
+            with torch.no_grad():
+                with torch.amp.autocast("cuda" if self.device.type == "cuda" else "cpu"):
+                    for pa, pp, pn in self.val_loader:
+                        pa, pp, pn = pa.to(self.device), pp.to(self.device), pn.to(self.device)
+                        za, zp, zn = self.model(pa, pp, pn)
+                        loss = triplet_loss_squared(za, zp, zn, margin=self.margin)
+                        val_loss += loss.item() * pa.size(0)
+                        val_count += pa.size(0)
+
+            val_loss /= max(val_count, 1)
+            lr = self.scheduler.get_last_lr()[0]
+            self.scheduler.step()
+
+            with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch, train_loss, val_loss, lr])
+
+            msg = f"[{epoch:02d}] train={train_loss:.6f}  val={val_loss:.6f}  lr={lr:.3e}"
+            self._log(msg, console=True)
+
+            if val_loss < self.best_val:
+                self.best_val = val_loss
+                torch.save(self.model.state_dict(), self.best_model_path)
+                self._log(f"[BEST] Saved model with val_loss={val_loss:.6f}", console=True)
+
+        self._log(f"Training finished. Best val_loss = {self.best_val:.6f}", console=True)
+
+        # Reference embeddings en train
+        self._log(
+            f"Computing reference embeddings on train set "
+            f"(samples_per_class={self.ref_samples_per_class}, "
+            f"use_augmentation={self.ref_use_augmentation})",
+            console=True,
+        )
+
+        ref_emb, ref_paths = compute_reference_embeddings_pointclouds(
+            model=self.model,
+            all_point_clouds=self.train_clouds,
+            device=self.device,
+            n_points=self.n_points,
+            samples_per_class=self.ref_samples_per_class,
+            use_augmentation=self.ref_use_augmentation,
+        )
+
+        if ref_emb:
+            np.savez(self.ref_emb_path, **ref_emb)
+            self._log(f"Saved reference embeddings for {len(ref_emb)} classes to {self.ref_emb_path}", console=True)
+        else:
+            self._log("WARNING: No reference embeddings were computed.", console=True)
+
+        if ref_paths:
+            with open(self.ref_paths_path, "w", encoding="utf-8") as f:
+                json.dump(ref_paths, f, indent=4)
+            self._log(f"Saved reference paths for {len(ref_paths)} classes to {self.ref_paths_path}", console=True)
+        else:
+            self._log("WARNING: No reference paths were computed.", console=True)
+
+        return self.model
