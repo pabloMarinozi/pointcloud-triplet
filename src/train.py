@@ -38,6 +38,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train TripletNet on 3D point clouds (.ply).")
     p.add_argument("--data_dir", type=str, required=True, help="Directorio raíz con .ply (recursivo).")
     p.add_argument("--runs_dir", type=str, default="runs", help="Donde guardar experimentos.")
+    p.add_argument("--run_name", type=str, default=None, help="Nombre determinístico del run (si no se da, usa timestamp).")
+    p.add_argument("--resume", action="store_true", help="Reanudar entrenamiento desde checkpoint_last.pt si existe.")
     p.add_argument("--seed", type=int, default=42)
 
     p.add_argument("--n_points", type=int, default=1024)
@@ -75,9 +77,10 @@ def main():
         device=device,
         runs_dir=args.runs_dir,
         val_size=args.val_size,
+        run_name=args.run_name,
     )
 
-    pipeline.train()
+    pipeline.train(resume=args.resume)
 
 
 if __name__ == "__main__":

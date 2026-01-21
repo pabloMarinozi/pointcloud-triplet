@@ -100,9 +100,13 @@ class TripletTrainingPipeline:
         device: torch.device,
         runs_dir: str = "runs",
         val_size: float = 0.2,
+        run_name: str | None = None,
     ):
         self.start_time = datetime.now()
-        timestamp = self.start_time.strftime("run_%Y-%m-%d_%H-%M-%S")
+        if run_name is not None:
+            timestamp = run_name
+        else:
+            timestamp = self.start_time.strftime("run_%Y-%m-%d_%H-%M-%S")
 
         self.exp_dir = os.path.join(runs_dir, timestamp)
         os.makedirs(self.exp_dir, exist_ok=True)
@@ -111,6 +115,7 @@ class TripletTrainingPipeline:
         self.log_path = os.path.join(self.exp_dir, "training.log")
         self.csv_path = os.path.join(self.exp_dir, "metrics.csv")
         self.best_model_path = os.path.join(self.exp_dir, "model_best.pt")
+        self.checkpoint_last_path = os.path.join(self.exp_dir, "checkpoint_last.pt")
         self.ref_emb_path = os.path.join(self.exp_dir, "reference_embeddings_train.npz")
         self.ref_paths_path = os.path.join(self.exp_dir, "reference_paths_train.json")
 
@@ -164,13 +169,20 @@ class TripletTrainingPipeline:
         train_paths = [p for _, p, _ in self.train_clouds]
         val_paths = [p for _, p, _ in self.val_clouds]
 
-        with open(self.train_split_path, "w", encoding="utf-8") as f:
-            json.dump(train_paths, f, indent=4)
-        with open(self.val_split_path, "w", encoding="utf-8") as f:
-            json.dump(val_paths, f, indent=4)
+        # Solo guardar splits si no existen (para mantener consistencia al reanudar)
+        if not os.path.exists(self.train_split_path):
+            with open(self.train_split_path, "w", encoding="utf-8") as f:
+                json.dump(train_paths, f, indent=4)
+            self._log(f"Saved train split to {self.train_split_path}", console=True)
+        else:
+            self._log(f"Train split already exists, keeping existing: {self.train_split_path}", console=True)
 
-        self._log(f"Saved train split to {self.train_split_path}", console=True)
-        self._log(f"Saved val split   to {self.val_split_path}", console=True)
+        if not os.path.exists(self.val_split_path):
+            with open(self.val_split_path, "w", encoding="utf-8") as f:
+                json.dump(val_paths, f, indent=4)
+            self._log(f"Saved val split   to {self.val_split_path}", console=True)
+        else:
+            self._log(f"Val split already exists, keeping existing: {self.val_split_path}", console=True)
         self._log(f"Train clouds: {len(train_clouds)}", console=True)
         self._log(f"Val clouds:   {len(val_clouds)}", console=True)
         self._log(f"Classes:      {len(folders)}", console=True)
@@ -205,10 +217,11 @@ class TripletTrainingPipeline:
         params = sum(p.numel() for p in self.model.parameters())
         self._log(f"Model parameters: {params}", console=True)
 
-        # CSV header
-        with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["epoch", "train_loss", "val_loss", "lr"])
+        # CSV header (solo si no existe o está vacío)
+        if not os.path.exists(self.csv_path) or os.path.getsize(self.csv_path) == 0:
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "train_loss", "val_loss", "lr"])
 
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lr)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs)
@@ -227,8 +240,74 @@ class TripletTrainingPipeline:
         if console:
             print(text)
 
-    def train(self):
-        for epoch in range(1, self.epochs + 1):
+    def _save_checkpoint(self, epoch: int, train_loss: float, val_loss: float, lr: float):
+        """Guarda un checkpoint completo con todo el estado necesario para reanudar."""
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "best_val": self.best_val,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "lr": lr,
+        }
+        if self.scaler is not None:
+            checkpoint["scaler_state_dict"] = self.scaler.state_dict()
+        torch.save(checkpoint, self.checkpoint_last_path)
+        self._log(f"[CHECKPOINT] Saved checkpoint at epoch {epoch}", console=False)
+
+    def _load_checkpoint(self) -> int | None:
+        """
+        Carga el checkpoint más reciente si existe.
+        Retorna la época desde la cual continuar, o None si no hay checkpoint.
+        """
+        if not os.path.exists(self.checkpoint_last_path):
+            return None
+
+        try:
+            checkpoint = torch.load(self.checkpoint_last_path, map_location=self.device)
+            start_epoch = checkpoint["epoch"] + 1  # Continuar desde la siguiente época
+
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            self.best_val = checkpoint.get("best_val", float("inf"))
+
+            if self.scaler is not None and "scaler_state_dict" in checkpoint:
+                self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+            self._log(
+                f"[RESUME] Loaded checkpoint from epoch {checkpoint['epoch']}, "
+                f"best_val={self.best_val:.6f}. Continuing from epoch {start_epoch}.",
+                console=True,
+            )
+            return start_epoch
+        except Exception as e:
+            self._log(f"[WARNING] Failed to load checkpoint: {e}. Starting from scratch.", console=True)
+            return None
+
+    def train(self, resume: bool = True):
+        """
+        Entrena el modelo.
+        
+        Args:
+            resume: Si True, intenta cargar un checkpoint existente y continuar desde ahí.
+        """
+        start_epoch = 1
+
+        if resume:
+            loaded_epoch = self._load_checkpoint()
+            if loaded_epoch is not None:
+                start_epoch = loaded_epoch
+                if start_epoch > self.epochs:
+                    self._log(
+                        f"Training already completed (epoch {start_epoch-1}/{self.epochs}). Skipping.",
+                        console=True,
+                    )
+                    return
+
+        for epoch in range(start_epoch, self.epochs + 1):
             # ----- TRAIN -----
             self.model.train()
             train_loss, train_count = 0.0, 0
@@ -285,6 +364,9 @@ class TripletTrainingPipeline:
                 self.best_val = val_loss
                 torch.save(self.model.state_dict(), self.best_model_path)
                 self._log(f"[BEST] Saved model with val_loss={val_loss:.6f}", console=True)
+
+            # Guardar checkpoint después de cada época
+            self._save_checkpoint(epoch, train_loss, val_loss, lr)
 
         self._log(f"Training finished. Best val_loss = {self.best_val:.6f}", console=True)
 
