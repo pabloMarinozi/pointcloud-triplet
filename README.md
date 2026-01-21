@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# pointcloud-triplet
-=======
 # Point Cloud Triplet Learning (CPN / PointNet-style) for 3D Identity Experiments
 
 Este repositorio implementa un pipeline reproducible de **metric learning** para **nubes de puntos 3D** densas, con el objetivo de aprender un **embedding** (representación vectorial) que preserve identidad: muestras de la misma “clase/identidad” quedan cerca en el espacio embebido, y muestras de clases distintas quedan lejos.
@@ -253,4 +250,3 @@ Cada CSV contiene:
 * `path`, `true_label`, `pred_label`, `correct`, `score`
 
 ---
->>>>>>> origin/master
