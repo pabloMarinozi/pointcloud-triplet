@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
+import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Tuple
+
+# Umbral de batches con NaN a partir del cual se re-ejecuta la época entera (retry).
+NAN_SKIP_THRESHOLD = 5
+# Máximo de reintentos de una misma época antes de avanzar sin guardar.
+MAX_RETRIES_PER_EPOCH = 3
 
 import numpy as np
 import torch
@@ -99,9 +106,12 @@ class TripletTrainingPipeline:
         seed: int,
         device: torch.device,
         runs_dir: str = "runs",
-        val_size: float = 0.2,
+        val_size: float = 0.15,
+        test_size: float = 0.15,
         run_name: str | None = None,
+        early_stopping_patience: int | None = None,
     ):
+        t0 = time.perf_counter()
         self.start_time = datetime.now()
         if run_name is not None:
             timestamp = run_name
@@ -110,6 +120,7 @@ class TripletTrainingPipeline:
 
         self.exp_dir = os.path.join(runs_dir, timestamp)
         os.makedirs(self.exp_dir, exist_ok=True)
+        print(f"  [PROGRESO] Directorio de run: {self.exp_dir} ({time.perf_counter() - t0:.1f}s)", flush=True)
 
         self.config_path = os.path.join(self.exp_dir, "config.json")
         self.log_path = os.path.join(self.exp_dir, "training.log")
@@ -123,6 +134,7 @@ class TripletTrainingPipeline:
         os.makedirs(self.splits_dir, exist_ok=True)
         self.train_split_path = os.path.join(self.splits_dir, "train_paths.json")
         self.val_split_path = os.path.join(self.splits_dir, "val_paths.json")
+        self.test_split_path = os.path.join(self.splits_dir, "test_paths.json")
 
         self.n_points = n_points
         self.ref_samples_per_class = 5
@@ -140,8 +152,11 @@ class TripletTrainingPipeline:
             "seed": seed,
             "device": str(device),
             "total_clouds": len(all_point_clouds),
+            "val_size": val_size,
+            "test_size": test_size,
             "ref_samples_per_class": self.ref_samples_per_class,
             "ref_use_augmentation": self.ref_use_augmentation,
+            "early_stopping_patience": early_stopping_patience,
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -152,22 +167,34 @@ class TripletTrainingPipeline:
         self._log(f"Using width    = {width}", console=True)
 
         # -----------------------------
-        # DATASET SPLIT (estratificado por carpeta)
+        # DATASET SPLIT 70/15/15 (train/val/test, estratificado por carpeta)
         # -----------------------------
+        t0 = time.perf_counter()
         folders = sorted(list(set(f for f, _, _ in all_point_clouds)))
 
-        train_clouds, val_clouds = [], []
+        train_clouds, val_clouds, test_clouds = [], [], []
         for folder in folders:
             class_clouds = [x for x in all_point_clouds if x[0] == folder]
-            tr, va = train_test_split(class_clouds, test_size=val_size, random_state=seed)
+            # Primero separar test (15%)
+            train_val, test = train_test_split(class_clouds, test_size=test_size, random_state=seed)
+            # Del resto (85%), separar val (15% del total = val_size/(1-test_size) del train_val)
+            val_ratio = val_size / (1.0 - test_size)
+            tr, va = train_test_split(train_val, test_size=val_ratio, random_state=seed)
             train_clouds.extend(tr)
             val_clouds.extend(va)
+            test_clouds.extend(test)
 
         self.train_clouds = train_clouds
         self.val_clouds = val_clouds
+        self.test_clouds = test_clouds
+        print(
+            f"  [PROGRESO] Split train/val/test: {len(train_clouds)} / {len(val_clouds)} / {len(test_clouds)} ({(time.perf_counter() - t0):.1f}s)",
+            flush=True,
+        )
 
         train_paths = [p for _, p, _ in self.train_clouds]
         val_paths = [p for _, p, _ in self.val_clouds]
+        test_paths = [p for _, p, _ in self.test_clouds]
 
         # Solo guardar splits si no existen (para mantener consistencia al reanudar)
         if not os.path.exists(self.train_split_path):
@@ -183,16 +210,28 @@ class TripletTrainingPipeline:
             self._log(f"Saved val split   to {self.val_split_path}", console=True)
         else:
             self._log(f"Val split already exists, keeping existing: {self.val_split_path}", console=True)
+
+        if not os.path.exists(self.test_split_path):
+            with open(self.test_split_path, "w", encoding="utf-8") as f:
+                json.dump(test_paths, f, indent=4)
+            self._log(f"Saved test split  to {self.test_split_path}", console=True)
+        else:
+            self._log(f"Test split already exists, keeping existing: {self.test_split_path}", console=True)
+
         self._log(f"Train clouds: {len(train_clouds)}", console=True)
         self._log(f"Val clouds:   {len(val_clouds)}", console=True)
+        self._log(f"Test clouds:  {len(test_clouds)}", console=True)
         self._log(f"Classes:      {len(folders)}", console=True)
 
         # -----------------------------
-        # DATALOADERS
+        # DATASETS Y DATALOADERS
         # -----------------------------
+        t0 = time.perf_counter()
         self.train_ds = TripletPointCloudDataset(self.train_clouds, n_points=n_points, train=True)
         self.val_ds = TripletPointCloudDataset(self.val_clouds, n_points=n_points, train=False)
+        print(f"  [PROGRESO] Datasets train/val creados ({time.perf_counter() - t0:.1f}s)", flush=True)
 
+        t0 = time.perf_counter()
         self.train_loader = DataLoader(
             self.train_ds,
             batch_size=batch_size,
@@ -209,12 +248,15 @@ class TripletTrainingPipeline:
             pin_memory=True,
             drop_last=False,
         )
+        print(f"  [PROGRESO] DataLoaders creados ({time.perf_counter() - t0:.1f}s)", flush=True)
 
         # -----------------------------
         # MODEL
         # -----------------------------
+        t0 = time.perf_counter()
         self.model = model_class(width=width).to(device)
         params = sum(p.numel() for p in self.model.parameters())
+        print(f"  [PROGRESO] Modelo en {device} ({params} params) ({time.perf_counter() - t0:.1f}s)", flush=True)
         self._log(f"Model parameters: {params}", console=True)
 
         # CSV header (solo si no existe o está vacío)
@@ -223,14 +265,18 @@ class TripletTrainingPipeline:
                 writer = csv.writer(f)
                 writer.writerow(["epoch", "train_loss", "val_loss", "lr"])
 
+        t0 = time.perf_counter()
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lr)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs)
+        print(f"  [PROGRESO] Optimizer y scheduler listos ({time.perf_counter() - t0:.1f}s)", flush=True)
 
         self.device = device
         self.margin = margin
         self.epochs = epochs
         self.clip_norm = clip_norm
         self.best_val = float("inf")
+        self.early_stopping_patience = early_stopping_patience
+        self.epochs_without_improvement = 0
 
         self.scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
 
@@ -251,6 +297,7 @@ class TripletTrainingPipeline:
             "train_loss": train_loss,
             "val_loss": val_loss,
             "lr": lr,
+            "epochs_without_improvement": self.epochs_without_improvement,
         }
         if self.scaler is not None:
             checkpoint["scaler_state_dict"] = self.scaler.state_dict()
@@ -273,6 +320,7 @@ class TripletTrainingPipeline:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             self.best_val = checkpoint.get("best_val", float("inf"))
+            self.epochs_without_improvement = checkpoint.get("epochs_without_improvement", 0)
 
             if self.scaler is not None and "scaler_state_dict" in checkpoint:
                 self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
@@ -287,10 +335,41 @@ class TripletTrainingPipeline:
             self._log(f"[WARNING] Failed to load checkpoint: {e}. Starting from scratch.", console=True)
             return None
 
+    def _reload_for_retry(self) -> bool:
+        """
+        Restaura modelo, optimizer, scheduler y best_val desde checkpoint_last.pt.
+        Se usa cuando re-ejecutamos una época por exceso de NaNs (retry de época).
+        El checkpoint corresponde al fin de la época anterior, así que el estado queda
+        listo para volver a correr la época actual desde el inicio.
+        Retorna True si se cargó correctamente, False si no existía checkpoint.
+        """
+        if not os.path.exists(self.checkpoint_last_path):
+            return False
+        try:
+            checkpoint = torch.load(self.checkpoint_last_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            self.best_val = checkpoint.get("best_val", float("inf"))
+            self.epochs_without_improvement = checkpoint.get("epochs_without_improvement", 0)
+            if self.scaler is not None and "scaler_state_dict" in checkpoint:
+                self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+            return True
+        except Exception:
+            return False
+
     def train(self, resume: bool = True):
         """
         Entrena el modelo.
-        
+
+        Incluye manejo de NaNs por overflow:
+        - Si la loss de un batch no es finita, se skipea el step (no se corrompen pesos).
+        - Clipping incremental: al primer skip de la época se reduce clip_norm para el resto
+          de la época, acotando pasos y reduciendo chance de más overflows.
+        - Retry de época: si skip_count >= NAN_SKIP_THRESHOLD (5) o val_loss no finita,
+          se recarga el estado desde el fin de la época anterior y se re-ejecuta la misma
+          época con clip_norm aún más bajo, sin avanzar scheduler ni guardar hasta lograrlo.
+
         Args:
             resume: Si True, intenta cargar un checkpoint existente y continuar desde ahí.
         """
@@ -308,67 +387,168 @@ class TripletTrainingPipeline:
                     return
 
         for epoch in range(start_epoch, self.epochs + 1):
-            # ----- TRAIN -----
-            self.model.train()
-            train_loss, train_count = 0.0, 0
+            epoch_success = False
+            retry_count = 0
+            early_stop_triggered = False
 
-            for pa, pp, pn in self.train_loader:
-                pa, pp, pn = pa.to(self.device), pp.to(self.device), pn.to(self.device)
-                self.optimizer.zero_grad(set_to_none=True)
+            while not epoch_success and retry_count <= MAX_RETRIES_PER_EPOCH:
+                # --- Retry de época: recuperar pesos de la última época completada ---
+                if retry_count > 0:
+                    if epoch > 1 and self._reload_for_retry():
+                        self.clip_norm = max(0.25, self.clip_norm * 0.5)
+                        self._log(
+                            f"[RETRY_EPOCH] epoch={epoch} retry={retry_count} "
+                            f"new_clip_norm={self.clip_norm:.4f} (reload from end of epoch {epoch-1})",
+                            console=True,
+                        )
+                    elif epoch == 1:
+                        self._log(
+                            f"[RETRY_EPOCH] epoch=1 no checkpoint to reload, advancing without saving",
+                            console=True,
+                        )
+                        break
+                    else:
+                        self._log(
+                            f"[RETRY_EPOCH] epoch={epoch} reload failed, advancing without saving",
+                            console=True,
+                        )
+                        break
 
-                with torch.amp.autocast("cuda" if self.device.type == "cuda" else "cpu"):
-                    za, zp, zn = self.model(pa, pp, pn)
-                    loss = triplet_loss_squared(za, zp, zn, margin=self.margin)
+                skip_count = 0
+                train_loss_sum = 0.0
+                train_count = 0
+                self.model.train()
 
-                if self.scaler:
-                    self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(self.optimizer)
-                    nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
-                    self.optimizer.step()
+                # ----- TRAIN -----
+                for batch_idx, (pa, pp, pn) in enumerate(self.train_loader):
+                    pa, pp, pn = pa.to(self.device), pp.to(self.device), pn.to(self.device)
+                    self.optimizer.zero_grad(set_to_none=True)
 
-                train_loss += loss.item() * pa.size(0)
-                train_count += pa.size(0)
-
-            train_loss /= train_count
-
-            # ----- VAL -----
-            self.model.eval()
-            val_loss, val_count = 0.0, 0
-
-            with torch.no_grad():
-                with torch.amp.autocast("cuda" if self.device.type == "cuda" else "cpu"):
-                    for pa, pp, pn in self.val_loader:
-                        pa, pp, pn = pa.to(self.device), pp.to(self.device), pn.to(self.device)
+                    with torch.amp.autocast("cuda" if self.device.type == "cuda" else "cpu"):
                         za, zp, zn = self.model(pa, pp, pn)
                         loss = triplet_loss_squared(za, zp, zn, margin=self.margin)
-                        val_loss += loss.item() * pa.size(0)
-                        val_count += pa.size(0)
 
-            val_loss /= max(val_count, 1)
-            lr = self.scheduler.get_last_lr()[0]
-            self.scheduler.step()
+                    if not torch.isfinite(loss).all():
+                        skip_count += 1
+                        # Clipping incremental: al primer NaN de la época, reducir clip_norm
+                        # para el resto de la época y así acotar los pasos siguientes.
+                        if skip_count == 1:
+                            self.clip_norm = max(0.25, self.clip_norm * 0.5)
+                            self._log(
+                                f"[NAN_SKIP] epoch={epoch} batch_idx={batch_idx} skip_count=1 "
+                                f"reducing_clip_norm_to={self.clip_norm:.4f}",
+                                console=True,
+                            )
+                        elif skip_count == NAN_SKIP_THRESHOLD:
+                            self._log(
+                                f"[NAN_SKIP] epoch={epoch} batch_idx={batch_idx} "
+                                f"skip_count={skip_count} (threshold={NAN_SKIP_THRESHOLD})",
+                                console=True,
+                            )
+                        else:
+                            self._log(
+                                f"[NAN_SKIP] epoch={epoch} batch_idx={batch_idx} skip_count={skip_count}",
+                                console=False,
+                            )
+                        continue
 
-            with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow([epoch, train_loss, val_loss, lr])
+                    if self.scaler:
+                        self.scaler.scale(loss).backward()
+                        self.scaler.unscale_(self.optimizer)
+                        nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        loss.backward()
+                        nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
+                        self.optimizer.step()
 
-            msg = f"[{epoch:02d}] train={train_loss:.6f}  val={val_loss:.6f}  lr={lr:.3e}"
-            self._log(msg, console=True)
+                    train_loss_sum += loss.item() * pa.size(0)
+                    train_count += pa.size(0)
 
-            if val_loss < self.best_val:
-                self.best_val = val_loss
-                torch.save(self.model.state_dict(), self.best_model_path)
-                self._log(f"[BEST] Saved model with val_loss={val_loss:.6f}", console=True)
+                train_loss = train_loss_sum / max(train_count, 1)
 
-            # Guardar checkpoint después de cada época
-            self._save_checkpoint(epoch, train_loss, val_loss, lr)
+                # ----- VAL -----
+                self.model.eval()
+                val_loss_sum = 0.0
+                val_count = 0
+
+                with torch.no_grad():
+                    with torch.amp.autocast("cuda" if self.device.type == "cuda" else "cpu"):
+                        for pa, pp, pn in self.val_loader:
+                            pa, pp, pn = pa.to(self.device), pp.to(self.device), pn.to(self.device)
+                            za, zp, zn = self.model(pa, pp, pn)
+                            loss = triplet_loss_squared(za, zp, zn, margin=self.margin)
+                            val_loss_sum += loss.item() * pa.size(0)
+                            val_count += pa.size(0)
+
+                val_loss = val_loss_sum / max(val_count, 1)
+
+                # Decidir si la época fue aceptable o hay que hacer retry
+                need_retry = skip_count >= NAN_SKIP_THRESHOLD or not math.isfinite(val_loss)
+                if need_retry:
+                    self._log(
+                        f"[RETRY_EPOCH] epoch={epoch} skip_count={skip_count} threshold={NAN_SKIP_THRESHOLD} "
+                        f"val_finite={math.isfinite(val_loss)}",
+                        console=True,
+                    )
+                    if retry_count < MAX_RETRIES_PER_EPOCH:
+                        retry_count += 1
+                        continue
+                    else:
+                        self._log(
+                            f"[WARNING] epoch={epoch} max_retries={MAX_RETRIES_PER_EPOCH} exceeded, advancing without saving",
+                            console=True,
+                        )
+                        break
+
+                epoch_success = True
+                lr = self.scheduler.get_last_lr()[0]
+                self.scheduler.step()
+
+                with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([epoch, train_loss, val_loss, lr])
+
+                msg = f"[{epoch:02d}] train={train_loss:.6f}  val={val_loss:.6f}  lr={lr:.3e}"
+                if skip_count > 0:
+                    msg += f"  (skipped={skip_count})"
+                self._log(msg, console=True)
+
+                if val_loss < self.best_val:
+                    self.best_val = val_loss
+                    self.epochs_without_improvement = 0
+                    torch.save(self.model.state_dict(), self.best_model_path)
+                    model_version_path = os.path.join(self.exp_dir, "model_version.json")
+                    with open(model_version_path, "w", encoding="utf-8") as f:
+                        json.dump({"epoch": epoch, "val_loss": float(val_loss)}, f, indent=2)
+                    self._log(f"[BEST] Saved model with val_loss={val_loss:.6f}", console=True)
+                else:
+                    self.epochs_without_improvement += 1
+
+                self._save_checkpoint(epoch, train_loss, val_loss, lr)
+
+                if (
+                    self.early_stopping_patience is not None
+                    and self.epochs_without_improvement >= self.early_stopping_patience
+                ):
+                    self._log(
+                        f"[EARLY_STOP] No improvement for {self.early_stopping_patience} epochs. "
+                        f"Stopping at epoch {epoch}. Best val_loss = {self.best_val:.6f}",
+                        console=True,
+                    )
+                    early_stop_triggered = True
+                    break
+
+            if early_stop_triggered:
+                break
 
         self._log(f"Training finished. Best val_loss = {self.best_val:.6f}", console=True)
+
+        # Marcar hasta qué época se entrenó (para carpetas de evaluación ep<N>)
+        last_epoch_path = os.path.join(self.exp_dir, "last_epoch.json")
+        with open(last_epoch_path, "w", encoding="utf-8") as f:
+            json.dump({"epoch": epoch}, f, indent=2)
 
         # Reference embeddings en train
         self._log(
