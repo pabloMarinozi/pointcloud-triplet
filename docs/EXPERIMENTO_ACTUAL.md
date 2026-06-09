@@ -17,17 +17,17 @@ Este documento resume qué hace el experimento y en qué archivos está implemen
 ### Entrenamiento
 | Qué | Dónde |
 |-----|--------|
-| Entrada CLI, pipeline, splits 70/15/15, checkpoints, ref embeddings del trainer | `src/train.py` → `src/pipeline/trainer.py` |
+| Entrada CLI, pipeline, splits 70/15/15, checkpoints | `src/train.py` → `src/pipeline/trainer.py` |
 | Script que lanza los 6 modelos (200 ep, sin early stop) | `scripts/run_6models_70_15_15.py` |
 | model_version.json, last_epoch.json (para carpetas ep<N>) | `src/pipeline/trainer.py` |
 
 ### Evaluación
 | Qué | Dónde |
 |-----|--------|
-| CLI eval, runs, split val/test/both/select_and_test, ref_strategy all/train | `src/eval.py` |
+| CLI eval, runs, split val/test/both/select_and_test, ref_strategy all | `src/eval.py` |
 | Carpetas ep<N>, copia de modelo y reporte por versión | `src/eval.py` (usa `get_model_version` del loader) |
 | Lista de estrategias de ref, get_model_version | `src/evaluation/loader.py` |
-| Generación de estrategias (centroid_5, …, all_train) si faltan | `src/evaluation/ref_strategies.py` |
+| Generación de estrategias (centroid_5, …, multiprototype_k5) si faltan | `src/evaluation/ref_strategies.py` |
 | evaluate_run_on_val, métricas de ranking, CSV con path/true/pred/score/rank_true/video/capture_form | `src/evaluation/report.py` |
 | rank_of_label, predict_class, métodos (Cosine, L2, …) | `src/evaluation/metrics.py` |
 | Carga index_videos.csv, extracción de video y forma de captura desde path .ply | `src/evaluation/video_index.py` |
@@ -41,8 +41,8 @@ Este documento resume qué hace el experimento y en qué archivos está implemen
 ### Documentación
 | Qué | Dónde |
 |-----|--------|
-| Qué se guarda en cada run y en ep<N>/ | `CONTENIDO_POR_RUN.md` |
-| Reporte de entrenamiento (val_loss, etc.) | `REPORTE_EXPERIMENTO.md` |
+| Qué se guarda en cada run y en ep<N>/ | `CONTENIDO_POR_RUN.md` (en `docs/`) |
+| Resultados de entrenamiento y evaluación, sugerencias | `RESULTADOS.md` (en `docs/`) |
 
 ### Datos del experimento
 | Qué | Dónde |

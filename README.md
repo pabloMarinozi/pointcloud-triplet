@@ -200,15 +200,12 @@ runs/run_YYYY-MM-DD_HH-MM-SS/
 ├─ training.log
 ├─ metrics.csv
 ├─ model_best.pt
-├─ reference_embeddings_train.npz
-├─ reference_paths_train.json
 └─ splits/
    ├─ train_paths.json
    └─ val_paths.json
 ```
 
 * `model_best.pt`: checkpoint con menor loss de validación
-* `reference_embeddings_train.npz`: embedding promedio por clase (prototipo)
 * `splits/*.json`: paths utilizados para reproducir validación
 
 ---

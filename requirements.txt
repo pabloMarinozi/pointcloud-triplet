@@ -1,5 +1,21 @@
-numpy
-scikit-learn
-open3d
-tqdm
-pandas
+# Dependencias del proyecto (Python 3.10).
+# Instalar con:  pip install -r requirements.txt
+#
+# NOTA SOBRE PYTORCH (GPU):
+# torch 2.5.1 está compilado para CUDA 12.1 (build +cu121). Para instalar la
+# build con GPU usá el índice oficial de PyTorch:
+#
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#
+# Si no tenés GPU NVIDIA, instalá la build de CPU:
+#
+#   pip install torch==2.5.1
+#
+# El resto se instala normal desde PyPI con este archivo.
+
+torch==2.5.1
+numpy==2.2.6
+scikit-learn==1.7.2
+open3d==0.19.0
+pandas==2.3.3
+tqdm==4.67.1

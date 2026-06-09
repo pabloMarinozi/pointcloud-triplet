@@ -43,9 +43,9 @@ def parse_args():
     p.add_argument(
         "--ref_strategy",
         type=str,
-        choices=("all", "train"),
+        choices=("all",),
         default="all",
-        help="Estrategias de reference embeddings: all (todas los .npz en el run) o train (solo reference_embeddings_train.npz).",
+        help="Estrategias de reference embeddings: all (todos los .npz en ep<N>/).",
     )
     p.add_argument("--export_csv", action="store_true", help="Exporta predicciones CSV dentro de cada run.")
     p.add_argument("--use_augmentation", action="store_true", help="Augmentation al embeder (prueba robustez).")
@@ -56,6 +56,41 @@ def parse_args():
         help="CSV con columnas video, forma (forma de captura). Si existe, se agregan columnas video y capture_form al CSV de predicciones.",
     )
     return p.parse_args()
+
+
+def _save_evaluation_report(
+    run_name: str,
+    split: str,
+    run_report_val: dict,
+    run_report_test: dict,
+    versioned_dir: str,
+) -> None:
+    """Guarda evaluation_report.json con el estado actual (val/test por estrategia)."""
+    if not run_report_val and not run_report_test:
+        return
+    report = {
+        "run_name": run_name,
+        "split": split,
+        "val": run_report_val,
+        "test": run_report_test,
+    }
+    if run_report_val:
+        best_s, best_m = max(
+            (
+                (s, max(r, key=lambda m: r[m]["accuracy"]))
+                for s, r in run_report_val.items()
+            ),
+            key=lambda x: run_report_val[x[0]][x[1]]["accuracy"],
+        )
+        report["best_val"] = {
+            "strategy": best_s,
+            "method": best_m,
+            "accuracy": run_report_val[best_s][best_m]["accuracy"],
+        }
+    report_path = os.path.join(versioned_dir, "evaluation_report.json")
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    print(f"\n  [Guardado] {report_path}")
 
 
 def main():
@@ -100,25 +135,16 @@ def main():
         if version is not None:
             versioned_dir = os.path.join(info.exp_dir, f"ep{version}")
             os.makedirs(versioned_dir, exist_ok=True)
-            print(f"Versión del modelo: ep{version} → {versioned_dir}")
+            print(f"Version del modelo: ep{version} -> {versioned_dir}")
         else:
             versioned_dir = info.exp_dir
 
-        # Reference embeddings: en versioned_dir; si no existen, copiar train desde root
-        train_ref_path = os.path.join(versioned_dir, "reference_embeddings_train.npz")
-        if versioned_dir != info.exp_dir and not os.path.exists(train_ref_path) and os.path.exists(info.ref_emb_path):
-            shutil.copy2(info.ref_emb_path, train_ref_path)
-            print(f"  Copiado reference_embeddings_train.npz a ep{version}/")
-
-        # Estrategias de reference embeddings (desde versioned_dir)
-        if args.ref_strategy == "train":
-            strategies = [("train", train_ref_path)] if os.path.exists(train_ref_path) else []
-        else:
-            strategies = list_ref_strategies(versioned_dir, train_ref_path)
+        # Estrategias de reference embeddings (desde versioned_dir; solo .npz que existan)
+        strategies = list_ref_strategies(versioned_dir)
         if not strategies:
-            print("⚠ No se encontró ningún reference_embeddings_*.npz. Saltando.")
-            continue
-        print(f"Estrategias de referencia: {[s[0] for s in strategies]}")
+            print("No hay reference_embeddings_*.npz en ep<N>/ - se generaran desde train_set despues de cargar el modelo.")
+        else:
+            print(f"Estrategias de referencia: {[s[0] for s in strategies]}")
 
         # Cargar splits según --split (select_and_test: solo val en esta pasada)
         eval_val = args.split in ("val", "both", "select_and_test")
@@ -167,12 +193,8 @@ def main():
             shutil.copy2(info.model_path, model_snapshot_path)
             print(f"  Modelo guardado en ep{version}/model.pt")
 
-        # Si solo existe "train" y queremos todas las estrategias, generarlas ahora
-        if (
-            args.ref_strategy == "all"
-            and len(strategies) == 1
-            and strategies[0][0] == "train"
-        ):
+        # Si no hay estrategias en ep<N>, generarlas (centroid_5, centroid_10, ...) desde train set
+        if len(strategies) == 0:
             train_split_path = get_train_split_path(info.exp_dir)
             if os.path.exists(train_split_path):
                 train_paths = load_train_paths(train_split_path)
@@ -181,14 +203,46 @@ def main():
                     ensure_all_strategies_saved(
                         versioned_dir, model, train_set, n_points, device
                     )
-                    strategies = list_ref_strategies(versioned_dir, train_ref_path)
+                    strategies = list_ref_strategies(versioned_dir)
                     print(f"Estrategias de referencia: {[s[0] for s in strategies]}")
 
+        # Cargar reporte existente para reanudar desde donde quedo (no recalcular estrategias ya guardadas)
         run_report_val = {}
         run_report_test = {}
+        report_path = os.path.join(versioned_dir, "evaluation_report.json")
+        if os.path.exists(report_path):
+            try:
+                with open(report_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                if existing.get("split") == args.split:
+                    run_report_val = existing.get("val") or {}
+                    run_report_test = existing.get("test") or {}
+                    if run_report_val or run_report_test:
+                        print(f"  Reanudando: {len(run_report_val)} estrategias ya evaluadas en val, {len(run_report_test)} en test.")
+                    if existing.get("best_val") and run_report_val:
+                        b = existing["best_val"]
+                        acc = float(b["accuracy"])
+                        if acc > global_best[3]:
+                            global_best = (run_name, b["strategy"], b["method"], acc)
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
 
         for strategy_name, ref_path in strategies:
             if not os.path.exists(ref_path):
+                continue
+            # Saltar estrategia ya evaluada (reanudar sin recalcular)
+            already_val = strategy_name in run_report_val
+            already_test = strategy_name in run_report_test
+            if already_val and (already_test or not eval_test):
+                print(f"\n--- Ref: {strategy_name} (ya evaluada, omitiendo) ---")
+                if run_report_val.get(strategy_name) and global_best[0] == run_name:
+                    best_m = max(
+                        run_report_val[strategy_name],
+                        key=lambda m: run_report_val[strategy_name][m]["accuracy"],
+                    )
+                    acc = run_report_val[strategy_name][best_m]["accuracy"]
+                    if acc > global_best[3]:
+                        global_best = (run_name, strategy_name, best_m, acc)
                 continue
             ref_data = np.load(ref_path)
             reference_embeddings = {k: ref_data[k] for k in ref_data.files}
@@ -282,31 +336,10 @@ def main():
                     print("  Top-10 (metric,class) por tasa de error (test):")
                     print(df_err_sorted.to_string(index=False))
 
-        # Guardar resumen de evaluación en el run (siempre)
-        if run_report_val or run_report_test:
-            report = {
-                "run_name": run_name,
-                "split": args.split,
-                "val": run_report_val,
-                "test": run_report_test,
-            }
-            if run_report_val:
-                best_s, best_m = max(
-                    (
-                        (s, max(r, key=lambda m: r[m]["accuracy"]))
-                        for s, r in run_report_val.items()
-                    ),
-                    key=lambda x: run_report_val[x[0]][x[1]]["accuracy"],
-                )
-                report["best_val"] = {
-                    "strategy": best_s,
-                    "method": best_m,
-                    "accuracy": run_report_val[best_s][best_m]["accuracy"],
-                }
-            report_path = os.path.join(versioned_dir, "evaluation_report.json")
-            with open(report_path, "w", encoding="utf-8") as f:
-                json.dump(report, f, indent=2, ensure_ascii=False)
-            print(f"\n  [Guardado] {report_path}")
+            # Guardar reporte al terminar cada estrategia (para no perder resultados si se interrumpe)
+            _save_evaluation_report(
+                run_name, args.split, run_report_val, run_report_test, versioned_dir
+            )
 
     # Global best (o protocolo select_and_test)
     if args.split == "select_and_test" and global_best[0] is not None:
@@ -314,16 +347,16 @@ def main():
         info = get_run_info(args.runs_dir, run_name)
         version = get_model_version(info.exp_dir)
         versioned_dir = os.path.join(info.exp_dir, f"ep{version}") if version is not None else info.exp_dir
-        ref_path = os.path.join(versioned_dir, "reference_embeddings_train.npz") if best_strategy == "train" else os.path.join(versioned_dir, f"reference_embeddings_{best_strategy}.npz")
+        ref_path = os.path.join(versioned_dir, f"reference_embeddings_{best_strategy}.npz")
         if not os.path.exists(info.test_split_path):
             print("\n" + "=" * 80)
-            print("SELECCIÓN POR VAL → TEST")
+            print("SELECCION POR VAL -> TEST")
             print("=" * 80)
             print(f"Selected run: {run_name} (ref={best_strategy}, {best_method_val}, val acc: {best_acc_val:.4f})")
             print("⚠ No se encontró splits/test_paths.json para este run. No se evaluó test.")
         elif not os.path.exists(ref_path):
             print("\n" + "=" * 80)
-            print("SELECCIÓN POR VAL → TEST")
+            print("SELECCION POR VAL -> TEST")
             print("=" * 80)
             print(f"Selected run: {run_name} (ref={best_strategy}, {best_method_val}, val acc: {best_acc_val:.4f})")
             print(f"⚠ No se encontró {ref_path}. No se evaluó test.")
@@ -336,7 +369,7 @@ def main():
             test_set = build_val_set(dataset_index, test_paths)
             if len(test_set) == 0:
                 print("\n" + "=" * 80)
-                print("SELECCIÓN POR VAL → TEST")
+                print("SELECCION POR VAL -> TEST")
                 print("=" * 80)
                 print(f"Selected run: {run_name} (ref={best_strategy}, {best_method_val}, val acc: {best_acc_val:.4f})")
                 print("⚠ Test set vacío.")
@@ -366,7 +399,7 @@ def main():
                 acc_test_selected = results_test[best_method_val]["accuracy"]
                 acc_test_best = results_test[best_method_test]["accuracy"]
                 print("\n" + "=" * 80)
-                print("SELECCIÓN POR VAL → TEST")
+                print("SELECCION POR VAL -> TEST")
                 print("=" * 80)
                 print(f"Selected run: {run_name} (ref={best_strategy}, {best_method_val}, val acc: {best_acc_val:.4f})")
                 print(f"Test accuracy (métrica usada en val): {best_method_val} = {acc_test_selected:.4f}")

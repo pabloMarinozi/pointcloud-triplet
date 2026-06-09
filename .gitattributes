@@ -1,0 +1,18 @@
+# Normaliza los finales de línea: el repositorio SIEMPRE guarda LF.
+# Cada quien hace checkout según su SO, pero git almacena LF de forma consistente.
+# Esto elimina los "diffs fantasma" CRLF<->LF entre Windows/Linux/Mac.
+* text=auto eol=lf
+
+# Scripts de shell siempre con LF (si no, no corren en Linux).
+*.sh text eol=lf
+
+# Archivos que git NO debe tocar nunca (evita corromper binarios).
+*.pdf  binary
+*.pt   binary
+*.pth  binary
+*.npz  binary
+*.ply  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.mp4  binary

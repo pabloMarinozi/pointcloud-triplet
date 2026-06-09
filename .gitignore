@@ -1,12 +1,30 @@
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .venv/
-.vscode/
+venv/
+env/
 
+# --- Editores / IDE ---
+.vscode/
+.idea/
+
+# --- Experimentos y artefactos generados ---
 runs/
 *.pt
 *.pth
 *.npz
 
+# --- Logs y reportes generados en la raíz ---
+eval_*.txt
+train_*.txt
+reporte_top5.txt
+
+# --- Binarios pesados (papers, PDFs) ---
+# Estos no deberían vivir en git. Compartilos por Drive/release.
+*.pdf
+
+# --- Sistema operativo ---
 .DS_Store
 Thumbs.db

@@ -82,19 +82,8 @@ def build_references_multiprototype(
     return refs
 
 
-def build_references_all_train(
-    class_to_embs: Dict[str, List[np.ndarray]]
-) -> Dict[str, np.ndarray]:
-    """Todos los embeddings de train por clase; predicción = mejor score sobre todos."""
-    return {
-        cls: np.array(embs, dtype=np.float32)
-        for cls, embs in class_to_embs.items()
-        if len(embs) > 0
-    }
-
-
 def save_all_strategies(exp_dir: str, class_to_embs: Dict[str, List[np.ndarray]]) -> List[str]:
-    """Guarda reference_embeddings_<strategy>.npz para todas las estrategias (no incluye 'train')."""
+    """Guarda reference_embeddings_<strategy>.npz para centroid_5, centroid_10, centroid_20, centroid_all, centroid_l2norm_5, multiprototype_k5."""
     saved = []
     refs = build_references_centroid(class_to_embs, 5)
     path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="centroid_5"))
@@ -111,6 +100,7 @@ def save_all_strategies(exp_dir: str, class_to_embs: Dict[str, List[np.ndarray]]
     np.savez(path, **refs)
     saved.append("centroid_20")
 
+    # centroid_all = centroide usando TODOS los embeddings de train (no solo 5/10/20)
     refs = build_references_centroid(class_to_embs, n_samples=None)
     path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="centroid_all"))
     np.savez(path, **refs)
@@ -125,11 +115,6 @@ def save_all_strategies(exp_dir: str, class_to_embs: Dict[str, List[np.ndarray]]
     path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="multiprototype_k5"))
     np.savez(path, **refs)
     saved.append("multiprototype_k5")
-
-    refs = build_references_all_train(class_to_embs)
-    path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="all_train"))
-    np.savez(path, **{k: v for k, v in refs.items()})
-    saved.append("all_train")
 
     return saved
 
@@ -161,19 +146,17 @@ def ensure_all_strategies_saved(
     device,
 ) -> List[str]:
     """
-    Si no existen las estrategias adicionales, embedea train, construye class_to_embs
+    Si no existen las estrategias generables, embedea el train set, construye class_to_embs
     y guarda reference_embeddings_*.npz para centroid_5, centroid_10, etc.
     Devuelve la lista de estrategias guardadas (puede estar vacía si ya existían).
     """
-    # Comprobar si ya hay algo más que "train"
+    want = {"centroid_5", "centroid_10", "centroid_20", "centroid_all", "centroid_l2norm_5", "multiprototype_k5"}
     existing = set()
     if os.path.isdir(exp_dir):
         for fname in os.listdir(exp_dir):
             if fname.startswith("reference_embeddings_") and fname.endswith(".npz"):
                 name = fname.replace("reference_embeddings_", "").replace(".npz", "")
-                if name != "train":
-                    existing.add(name)
-    want = {"centroid_5", "centroid_10", "centroid_20", "centroid_all", "centroid_l2norm_5", "multiprototype_k5", "all_train"}
+                existing.add(name)
     if existing >= want:
         return []
 

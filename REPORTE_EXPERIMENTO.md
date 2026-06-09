@@ -41,7 +41,7 @@ Métricas al final del entrenamiento (epoch 200) y mejor val_loss guardado (mode
 
 ## 3. Evaluación (val / test)
 
-La evaluación se ejecutó por consola. Las **accuracy por estrategia de referencia** (train, centroid_5, centroid_10, centroid_20, centroid_all, centroid_l2norm_5, multiprototype_k5, all_train) y por **métrica** (Cosine, L2, etc.) **no están guardadas** en el repo; solo se vieron en la terminal.
+La evaluación se ejecutó por consola. Las **accuracy por estrategia de referencia** (centroid_5, centroid_10, centroid_20, centroid_all, centroid_l2norm_5, multiprototype_k5) y por **métrica** (Cosine, L2, etc.) **no están guardadas** en el repo; solo se vieron en la terminal.
 
 Para obtener un reporte completo de evaluación y guardarlo:
 

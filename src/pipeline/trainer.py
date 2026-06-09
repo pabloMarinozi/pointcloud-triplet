@@ -5,7 +5,6 @@ import json
 import math
 import os
 import time
-from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Tuple
 
@@ -32,59 +31,6 @@ def _get_embedding_from_model(model: nn.Module, x: torch.Tensor) -> torch.Tensor
         return model.forward_once(x)
     za, _, _ = model(x, x, x)
     return za
-
-
-def compute_reference_embeddings_pointclouds(
-    model: nn.Module,
-    all_point_clouds,
-    device: torch.device,
-    n_points: int,
-    samples_per_class: int = 5,
-    use_augmentation: bool = False,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, List[str]]]:
-    model.eval()
-    reference_embeddings: Dict[str, np.ndarray] = {}
-    reference_paths: Dict[str, List[str]] = {}
-
-    class_to_indices = defaultdict(list)
-    for idx, (folder, _, _) in enumerate(all_point_clouds):
-        class_to_indices[folder].append(idx)
-
-    with torch.no_grad():
-        for cls, indices in class_to_indices.items():
-            if len(indices) == 0:
-                continue
-
-            indices = np.array(indices)
-            np.random.shuffle(indices)
-            selected_indices = indices[: min(samples_per_class, len(indices))]
-
-            embs = []
-            paths = []
-
-            for idx in selected_indices:
-                folder, path, cloud = all_point_clouds[int(idx)]
-                paths.append(path)
-
-                pts = normalize_unit_sphere(to_numpy(cloud)).astype(np.float32)
-                pts_proc = augment(pts, n_points) if use_augmentation else sample_n(pts, n_points)
-
-                pc_tensor = torch.from_numpy(pts_proc.T).unsqueeze(0).float().to(device)
-
-                emb = _get_embedding_from_model(model, pc_tensor)
-                emb = emb.detach().cpu().numpy()
-
-                if emb.ndim == 2 and emb.shape[0] == 1:
-                    emb = emb[0]
-
-                embs.append(emb)
-
-            if embs:
-                embs_arr = np.vstack(embs)
-                reference_embeddings[cls] = embs_arr.mean(axis=0)
-                reference_paths[cls] = paths
-
-    return reference_embeddings, reference_paths
 
 
 class TripletTrainingPipeline:
@@ -127,9 +73,6 @@ class TripletTrainingPipeline:
         self.csv_path = os.path.join(self.exp_dir, "metrics.csv")
         self.best_model_path = os.path.join(self.exp_dir, "model_best.pt")
         self.checkpoint_last_path = os.path.join(self.exp_dir, "checkpoint_last.pt")
-        self.ref_emb_path = os.path.join(self.exp_dir, "reference_embeddings_train.npz")
-        self.ref_paths_path = os.path.join(self.exp_dir, "reference_paths_train.json")
-
         self.splits_dir = os.path.join(self.exp_dir, "splits")
         os.makedirs(self.splits_dir, exist_ok=True)
         self.train_split_path = os.path.join(self.splits_dir, "train_paths.json")
@@ -137,8 +80,6 @@ class TripletTrainingPipeline:
         self.test_split_path = os.path.join(self.splits_dir, "test_paths.json")
 
         self.n_points = n_points
-        self.ref_samples_per_class = 5
-        self.ref_use_augmentation = False
 
         config = {
             "start_datetime": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -154,8 +95,6 @@ class TripletTrainingPipeline:
             "total_clouds": len(all_point_clouds),
             "val_size": val_size,
             "test_size": test_size,
-            "ref_samples_per_class": self.ref_samples_per_class,
-            "ref_use_augmentation": self.ref_use_augmentation,
             "early_stopping_patience": early_stopping_patience,
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
@@ -549,35 +488,5 @@ class TripletTrainingPipeline:
         last_epoch_path = os.path.join(self.exp_dir, "last_epoch.json")
         with open(last_epoch_path, "w", encoding="utf-8") as f:
             json.dump({"epoch": epoch}, f, indent=2)
-
-        # Reference embeddings en train
-        self._log(
-            f"Computing reference embeddings on train set "
-            f"(samples_per_class={self.ref_samples_per_class}, "
-            f"use_augmentation={self.ref_use_augmentation})",
-            console=True,
-        )
-
-        ref_emb, ref_paths = compute_reference_embeddings_pointclouds(
-            model=self.model,
-            all_point_clouds=self.train_clouds,
-            device=self.device,
-            n_points=self.n_points,
-            samples_per_class=self.ref_samples_per_class,
-            use_augmentation=self.ref_use_augmentation,
-        )
-
-        if ref_emb:
-            np.savez(self.ref_emb_path, **ref_emb)
-            self._log(f"Saved reference embeddings for {len(ref_emb)} classes to {self.ref_emb_path}", console=True)
-        else:
-            self._log("WARNING: No reference embeddings were computed.", console=True)
-
-        if ref_paths:
-            with open(self.ref_paths_path, "w", encoding="utf-8") as f:
-                json.dump(ref_paths, f, indent=4)
-            self._log(f"Saved reference paths for {len(ref_paths)} classes to {self.ref_paths_path}", console=True)
-        else:
-            self._log("WARNING: No reference paths were computed.", console=True)
 
         return self.model

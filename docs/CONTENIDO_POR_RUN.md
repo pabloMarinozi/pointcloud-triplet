@@ -8,8 +8,8 @@ Cada run es una carpeta dentro de `runs/` (por ejemplo `runs/w16_np512_m0.5_lr1e
 
 | Archivo / carpeta | Cuándo | Contenido |
 |-------------------|--------|-----------|
-| **config.json** | Al crear el run | Hiperparámetros: n_points, width, lr, margin, epochs, batch_size, seed, val_size, test_size, ref_samples_per_class, early_stopping_patience, etc. |
-| **training.log** | Cada época y mensajes | Log de texto: pérdidas, best model, checkpoints, NaN/retry, early stop, referencia al guardar ref embeddings. |
+| **config.json** | Al crear el run | Hiperparámetros: n_points, width, lr, margin, epochs, batch_size, seed, val_size, test_size, early_stopping_patience, etc. |
+| **training.log** | Cada época y mensajes | Log de texto: pérdidas, best model, checkpoints, NaN/retry, early stop. |
 | **metrics.csv** | Cada época | Una fila por época: `epoch`, `train_loss`, `val_loss`, `lr`. |
 | **model_best.pt** | Cuando val_loss mejora | Solo `state_dict` del modelo (pesos). Siempre el mejor hasta ahora. |
 | **model_version.json** | Cuando se guarda model_best.pt | `{"epoch": N, "val_loss": ...}` — época del modelo guardado en model_best.pt. |
@@ -18,8 +18,6 @@ Cada run es una carpeta dentro de `runs/` (por ejemplo `runs/w16_np512_m0.5_lr1e
 | **splits/train_paths.json** | Al iniciar entrenamiento | Lista de paths de muestras de entrenamiento (70%). |
 | **splits/val_paths.json** | Al iniciar entrenamiento | Lista de paths de validación (15%). |
 | **splits/test_paths.json** | Al iniciar entrenamiento | Lista de paths de test (15%). |
-| **reference_embeddings_train.npz** | Al terminar las épocas | Referencias por clase (centroide 5 muestras de train). Lo escribe el **trainer**; la eval puede copiarlo a `ep<N>/` para conservarlo. |
-| **reference_paths_train.json** | Al terminar las épocas | Qué paths se usaron para ese centroide: clase → lista de paths (5 por clase). |
 
 ---
 
@@ -30,8 +28,7 @@ La eval usa la época actual del run (`last_epoch.json` o `model_version.json`) 
 | Archivo / carpeta | Contenido |
 |-------------------|-----------|
 | **model.pt** | Copia del modelo (state_dict) usada en esta evaluación. Si seguís entrenando, `model_best.pt` en la raíz se actualiza; con `ep<N>/model.pt` podés recuperar la versión de esa época. |
-| **reference_embeddings_train.npz** | Copia del de la raíz la primera vez que evaluás esta versión (para no perderla si después reentrenás). |
-| **reference_embeddings_centroid_5.npz**, **centroid_10**, … | Estrategias extra que genera la eval (si `--ref_strategy all`). |
+| **reference_embeddings_centroid_5.npz**, **centroid_10**, … | Estrategias que genera la eval si no existen (centroid_5, centroid_10, centroid_20, centroid_all, centroid_l2norm_5, multiprototype_k5). |
 | **evaluation_report.json** | Resumen: accuracy por estrategia y método; `best_val` (estrategia, método, accuracy). |
 | **evaluation/** | Solo con `--export_csv`: subcarpetas por estrategia con CSVs de predicciones por método. |
 | **evaluation_test/** | Solo con `--export_csv` y si evaluás test: igual que `evaluation/` para el split de test. |
@@ -53,22 +50,18 @@ runs/<run_name>/
 ├── model_version.json        ← época del best model
 ├── last_epoch.json           ← última época completada
 ├── checkpoint_last.pt
-├── reference_embeddings_train.npz   ← trainer (se puede copiar a ep<N>/)
-├── reference_paths_train.json
 ├── splits/
 │   ├── train_paths.json
 │   ├── val_paths.json
 │   └── test_paths.json
 ├── ep200/                     ← evaluación “después de 200 épocas”
 │   ├── model.pt               ← snapshot del modelo (recuperable si seguís entrenando)
-│   ├── reference_embeddings_train.npz
 │   ├── reference_embeddings_centroid_5.npz
 │   ├── ... (resto de estrategias)
 │   ├── evaluation_report.json
 │   ├── evaluation/
 │   └── evaluation_test/
 └── ep300/                     ← si entrenás 100 más y volvés a evaluar
-    ├── reference_embeddings_train.npz
     ├── ...
     ├── evaluation_report.json
     └── ...

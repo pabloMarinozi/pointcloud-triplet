@@ -14,7 +14,6 @@ class RunInfo:
     exp_dir: str
     config_path: str
     model_path: str
-    ref_emb_path: str
     val_split_path: str
     test_split_path: str
 
@@ -72,7 +71,6 @@ def get_run_info(runs_dir: str, run_name: str) -> RunInfo:
         exp_dir=exp_dir,
         config_path=os.path.join(exp_dir, "config.json"),
         model_path=os.path.join(exp_dir, "model_best.pt"),
-        ref_emb_path=os.path.join(exp_dir, "reference_embeddings_train.npz"),
         val_split_path=os.path.join(exp_dir, "splits", "val_paths.json"),
         test_split_path=os.path.join(exp_dir, "splits", "test_paths.json"),
     )
@@ -130,21 +128,17 @@ def get_model_version(exp_dir: str) -> int | None:
     return None
 
 
-def list_ref_strategies(exp_dir: str, ref_emb_path: str) -> List[Tuple[str, str]]:
+def list_ref_strategies(exp_dir: str) -> List[Tuple[str, str]]:
     """
     Lista (nombre_estrategia, path) de reference embeddings en exp_dir.
-    Incluye "train" (reference_embeddings_train.npz) primero si existe,
-    luego reference_embeddings_<strategy>.npz con strategy != "train".
+    Cualquier archivo reference_embeddings_<strategy>.npz.
     """
     strategies: List[Tuple[str, str]] = []
-    if os.path.exists(ref_emb_path):
-        strategies.append(("train", ref_emb_path))
     if os.path.isdir(exp_dir):
         for fname in sorted(os.listdir(exp_dir)):
             if fname.startswith("reference_embeddings_") and fname.endswith(".npz"):
                 name = fname.replace("reference_embeddings_", "").replace(".npz", "")
-                if name != "train":
-                    strategies.append((name, os.path.join(exp_dir, fname)))
+                strategies.append((name, os.path.join(exp_dir, fname)))
     return strategies
 
 
