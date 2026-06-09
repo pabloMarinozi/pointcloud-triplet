@@ -6,9 +6,10 @@ __pycache__/
 venv/
 env/
 
-# --- Editores / IDE ---
+# --- Editores / IDE / asistentes ---
 .vscode/
 .idea/
+.claude/
 
 # --- Experimentos y artefactos generados ---
 runs/

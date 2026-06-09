@@ -33,39 +33,55 @@ sección 7.
 
 ## 2. Estado de los runs
 
-Los 6 runs corrieron a 200 épocas. **`w8_lr3e-4` se extendió luego a 400 épocas**
-(reanudado con `--resume`); su mejor checkpoint es la **época 390**.
+Los 6 runs corrieron a 200 épocas. Dos se extendieron luego con `--resume`:
+**`w8_lr3e-4` se llevó hasta 1000 épocas** y **`w16_lr3e-4` hasta 400**.
 
-| Run | Épocas completadas | Época del best | Best val_loss | Evaluación guardada |
-|-----|--------------------|----------------|---------------|---------------------|
-| w8_np512_m0.5_lr3e-4_bs16_seed42  | **400** | **390** | **0.1137** | ep200 (*) |
-| w16_np512_m0.5_lr1e-3_bs16_seed42 | 200 | 181 | 0.1579 | ep200 |
-| w16_np512_m0.5_lr3e-4_bs16_seed42 | 200 | 197 | 0.1692 | ep200 |
-| w32_np512_m0.5_lr3e-4_bs16_seed42 | 200 | 193 | 0.1735 | ep200 |
-| w32_np512_m0.5_lr1e-3_bs16_seed42 | 200 | 189 | 0.1754 | ep200 |
-| w8_np512_m0.5_lr1e-3_bs16_seed42  | 200 | ~120 | 0.1812 | ep200 |
-
-(*) **Importante:** la evaluación guardada de `w8_lr3e-4` corresponde al modelo de
-**200 épocas** (`ep200/`), no al best actual de 400. La evaluación de `ep400` aún
-**no se corrió**; ver sección 5.
+| Run | Épocas completadas | Best val_loss | Evaluación guardada |
+|-----|--------------------|---------------|---------------------|
+| w8_np512_m0.5_lr3e-4_bs16_seed42  | **1000** | **0.0701** | ep200 / ep400 / ep1000 |
+| w16_np512_m0.5_lr1e-3_bs16_seed42 | 200 | 0.1579 | ep200 |
+| w16_np512_m0.5_lr3e-4_bs16_seed42 | 400 | 0.1688 | ep200 |
+| w32_np512_m0.5_lr3e-4_bs16_seed42 | 200 | 0.1735 | ep200 |
+| w32_np512_m0.5_lr1e-3_bs16_seed42 | 200 | 0.1754 | ep200 |
+| w8_np512_m0.5_lr1e-3_bs16_seed42  | 200 | 0.1812 | ep200 |
 
 **Conclusiones de entrenamiento:**
 
-- **Mejor val_loss global:** `w8_lr3e-4`, época 390 → **0.1137** (modelo de 400 épocas).
-  A 200 épocas su mejor val_loss era 0.1321.
+- **Mejor modelo global:** `w8_lr3e-4` entrenado a **1000 épocas** → best val_loss **0.0701**.
+  Sigue mejorando con más entrenamiento, sin señales de overfitting (val_loss baja de
+  forma sostenida: ~0.13 @ep200 → ~0.07 @ep1000).
 - Los modelos anchos (`w32`) tienen train_loss muy bajo (0.10–0.13) pero val_loss más
-  alto (~0.20) → **overfitting** claro.
+  alto (~0.20) → **overfitting** claro; no se beneficiaron de más entrenamiento.
 - `w8_lr1e-3` no mejora con más entrenamiento (su mejor checkpoint es temprano).
+- Lección clave: la palanca más efectiva fue **más épocas sobre `w8_lr3e-4`**, no más
+  capacidad (width).
 
 ---
 
-## 3. Resultados de evaluación (val / test, modelo a ep200)
-
-Reportes en `runs/<run>/ep200/evaluation_report.json`. Para cada run se toma la
-**mejor combinación estrategia + método en val** y se reportan las métricas en val y test.
+## 3. Resultados de evaluación (val / test)
 
 Métricas: `acc` = accuracy top-1; `top5`/`top10` = clase verdadera en top-5/top-10;
 `MRR` = Mean Reciprocal Rank; `mean_rank` = rango promedio (1-based) de la clase verdadera.
+Para cada run se toma la **mejor combinación estrategia + método en val**.
+
+### 3.1 Mejor modelo: progresión de `w8_lr3e-4` con más épocas
+
+El mejor run (`w8_lr3e-4`, estrategia `centroid_all` + `L1 Distance`) mejora de forma
+clara al entrenar más épocas. Este es el resultado **vigente** del proyecto:
+
+| Versión | Val acc | Val top5 | Val MRR | Val mean_rank | Test acc | Test top5 | Test MRR | Test mean_rank |
+|---------|---------|----------|---------|---------------|----------|-----------|----------|----------------|
+| ep200  | 19.2% | 56.3% | 0.363 | 7.4 | 19.2% | 55.6% | 0.361 | 7.5 |
+| ep400  | 25.0% | 66.4% | 0.431 | 5.9 | ~23.4% | ~63% | ~0.41 | ~6.3 |
+| **ep1000** | **34.1%** | **81.0%** | **0.537** | **3.7** | **34.0%** | **80.3%** | **0.535** | **3.8** |
+
+→ Pasar de 200 a 1000 épocas casi **dobló** la accuracy (19% → 34%) y subió el top5 a ~80%.
+Val y test van muy parejos → no hay overfitting.
+
+### 3.2 Comparación entre runs (modelo a ep200)
+
+Tabla histórica con todos los runs evaluados a 200 épocas (única versión evaluada para
+los 5 runs restantes). Reportes en `runs/<run>/ep200/evaluation_report.json`.
 
 | Run | Estrategia | Método | Val acc | Val top5 | Val top10 | Val MRR | Val mean_rank | Test acc | Test top5 | Test top10 | Test MRR | Test mean_rank |
 |-----|------------|--------|---------|----------|-----------|---------|---------------|----------|-----------|------------|----------|----------------|
@@ -78,8 +94,8 @@ Métricas: `acc` = accuracy top-1; `top5`/`top10` = clase verdadera en top-5/top
 
 **Conclusiones de evaluación:**
 
-- **Mejor run:** `w8_lr3e-4` (centroid_all + L1): ~19.2% acc en val y test, top5 ~56%,
-  MRR ~0.36, mean_rank ~7.4.
+- **Mejor run vigente:** `w8_lr3e-4` a **ep1000** (centroid_all + L1): **34% acc** en val y
+  test, top5 ~80%, MRR ~0.54, mean_rank ~3.7 (ver 3.1). A ep200 era 19.2%.
 - Val y test son muy parecidos en todos los runs → poco overfitting a nivel de ranking.
 - `L1 Distance` (y en menor medida L2/Cosine) son los mejores métodos; `Dot Product` va mal.
 - `centroid_all` y `multiprototype_k5` superan a `centroid_5/10/20`.
@@ -107,14 +123,11 @@ Métricas: `acc` = accuracy top-1; `top5`/`top10` = clase verdadera en top-5/top
 
 ## 5. Próximos pasos concretos
 
-1. **Evaluar el modelo actual de `w8_lr3e-4` (400 épocas).** Genera `ep400/` y permite
-   compararlo con `ep200`:
-   ```bash
-   python -m src.eval --data_dir <ruta_a_ply> --runs_dir runs \
-       --run w8_np512_m0.5_lr3e-4_bs16_seed42 --export_csv
-   ```
-2. **Re-evaluar todos y guardar la salida** (hoy las métricas completas solo se vieron
-   en consola para algunos runs):
+1. **Seguir explotando `w8_lr3e-4`.** Es la palanca que más rindió (19% → 34% acc subiendo
+   épocas). Conviene ver si sigue mejorando más allá de 1000 épocas y/o con lr decay, y
+   replicar la receta (lr 3e-4, más épocas) en `w16_lr3e-4`.
+2. **Re-evaluar todos y guardar la salida en JSON/CSV, no en logs de consola** (hoy las
+   métricas de ep400/ep1000 solo viven en `eval_*.txt`, que son volcados de terminal):
    ```bash
    python -m src.eval --data_dir <ruta_a_ply> --run all > reporte_eval.txt 2>&1
    ```
@@ -138,9 +151,20 @@ Métricas: `acc` = accuracy top-1; `top5`/`top10` = clase verdadera en top-5/top
 
 ---
 
-## 7. Discrepancias detectadas entre los reportes viejos (a verificar)
+## 7. Procedencia de los datos y discrepancias a verificar
 
-Al consolidar quedaron diferencias que conviene confirmar contra los `runs/`:
+**Fuentes:** las cifras de ep200 vienen de los tres reportes de febrero 2026
+(`evaluation_report.json` de cada run). Las cifras de **ep400 y ep1000** se extrajeron de
+los logs de consola `eval_w8_lr3e-4_ep400.txt`, `eval_w8_lr3e-4_ep1000.txt`,
+`train_w8_lr3e-4_to600.txt` (este último llegó a 1000 épocas pese al nombre) y
+`train_w16_lr3e-4_to400.txt`, de fines de abril 2026.
+
+> **Sobre esos `.txt`:** son volcados de terminal en UTF-16, con ruido y errores de lectura
+> de PLY. **No conviene versionarlos** (siguen en `.gitignore`); su contenido útil ya quedó
+> en este doc. La fuente estructurada real es `runs/<run>/ep<N>/evaluation_report.json`. Si
+> querés guardar el detalle por método, exportá los JSON/CSV, no los logs.
+
+Diferencias entre reportes viejos que conviene confirmar contra los `runs/`:
 
 - **Best val_loss de `w8_lr1e-3`:** el reporte viejo de resultados decía 0.1812
   (best en ~ep120), pero el informe de avance lo reportaba como 0.2065 (ep200).
