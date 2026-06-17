@@ -219,16 +219,18 @@ La evaluación actual implementa un enfoque práctico de **clasificación por pr
 * predice la clase por **máxima similitud** o **mínima distancia** según la métrica,
 * exporta CSVs de predicción por método.
 
+> **Determinismo:** la evaluación fija las semillas de `random`, `numpy` y `torch` antes de cualquier muestreo mediante el argumento `--seed` (default 42). Dos corridas con el mismo valor de `--seed` producen métricas **idénticas** (ver docs/RESULTADOS.md para resultados de referencia).
+
 ### Evaluar el último experimento
 
 ```bash
-python -m src.eval --data_dir "./dataset_ply" --runs_dir runs --run latest --export_csv
+python -m src.eval --data_dir "./dataset_ply" --runs_dir runs --run latest --export_csv --seed 42
 ```
 
 ### Evaluar todos los experimentos
 
 ```bash
-python -m src.eval --data_dir "./dataset_ply" --runs_dir runs --run all --export_csv
+python -m src.eval --data_dir "./dataset_ply" --runs_dir runs --run all --export_csv --seed 42
 ```
 
 ### Outputs
