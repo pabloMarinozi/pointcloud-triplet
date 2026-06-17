@@ -26,6 +26,7 @@ from src.evaluation.report import evaluate_run_on_val, summarize_errors_by_class
 from src.evaluation.ref_strategies import ensure_all_strategies_saved
 from src.evaluation.video_index import load_video_index
 from src.models.triplet import TripletNet
+from src.utils.seed import set_seed
 
 
 def parse_args():
@@ -47,6 +48,7 @@ def parse_args():
         default="all",
         help="Estrategias de reference embeddings: all (todos los .npz en ep<N>/).",
     )
+    p.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad.")
     p.add_argument("--export_csv", action="store_true", help="Exporta predicciones CSV dentro de cada run.")
     p.add_argument("--use_augmentation", action="store_true", help="Augmentation al embeder (prueba robustez).")
     p.add_argument(
@@ -95,6 +97,8 @@ def _save_evaluation_report(
 
 def main():
     args = parse_args()
+    set_seed(args.seed)
+    print(f"Seed: {args.seed}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
