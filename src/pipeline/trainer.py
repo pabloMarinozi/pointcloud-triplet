@@ -56,6 +56,7 @@ class TripletTrainingPipeline:
         test_size: float = 0.15,
         run_name: str | None = None,
         early_stopping_patience: int | None = None,
+        sampling: str = "random",
     ):
         t0 = time.perf_counter()
         self.start_time = datetime.now()
@@ -80,6 +81,7 @@ class TripletTrainingPipeline:
         self.test_split_path = os.path.join(self.splits_dir, "test_paths.json")
 
         self.n_points = n_points
+        self.sampling = sampling
 
         config = {
             "start_datetime": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -96,6 +98,7 @@ class TripletTrainingPipeline:
             "val_size": val_size,
             "test_size": test_size,
             "early_stopping_patience": early_stopping_patience,
+            "sampling": sampling,
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -166,8 +169,8 @@ class TripletTrainingPipeline:
         # DATASETS Y DATALOADERS
         # -----------------------------
         t0 = time.perf_counter()
-        self.train_ds = TripletPointCloudDataset(self.train_clouds, n_points=n_points, train=True)
-        self.val_ds = TripletPointCloudDataset(self.val_clouds, n_points=n_points, train=False)
+        self.train_ds = TripletPointCloudDataset(self.train_clouds, n_points=n_points, train=True, sampling=sampling)
+        self.val_ds = TripletPointCloudDataset(self.val_clouds, n_points=n_points, train=False, sampling=sampling)
         print(f"  [PROGRESO] Datasets train/val creados ({time.perf_counter() - t0:.1f}s)", flush=True)
 
         t0 = time.perf_counter()

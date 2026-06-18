@@ -23,8 +23,13 @@ def normalize_unit_sphere(points: np.ndarray) -> np.ndarray:
     return pts / (scale + 1e-8)
 
 
-def sample_n(points: np.ndarray, n_points: int) -> np.ndarray:
+def sample_n(points: np.ndarray, n_points: int, sampling: str = "random") -> np.ndarray:
     n = len(points)
+    if sampling in ("fps", "fps_baya") and n >= n_points:
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd = pcd.farthest_point_down_sample(n_points)
+        return np.asarray(pcd.points, dtype=np.float32)
     if n >= n_points:
         idx = np.random.choice(n, n_points, replace=False)
     else:
@@ -32,7 +37,7 @@ def sample_n(points: np.ndarray, n_points: int) -> np.ndarray:
     return points[idx]
 
 
-def augment(points: np.ndarray, n_points: int) -> np.ndarray:
+def augment(points: np.ndarray, n_points: int, sampling: str = "random") -> np.ndarray:
     theta = np.random.uniform(-pi, pi)
     R = np.array(
         [[cos(theta), -sin(theta), 0],
@@ -42,20 +47,17 @@ def augment(points: np.ndarray, n_points: int) -> np.ndarray:
     )
     pts = points @ R.T
 
-    # escalado
     s = np.float32(np.random.uniform(0.8, 1.25))
     pts *= s
 
-    # jitter
     noise = np.clip(np.random.normal(0, 0.01, pts.shape), -0.05, 0.05).astype(np.float32)
     pts += noise
 
-    # dropout de puntos
     keep = max(1, int(len(pts) * np.random.uniform(0.9, 1.0)))
     idx = np.random.choice(len(pts), keep, replace=False)
     pts = pts[idx]
 
-    return sample_n(pts, n_points)
+    return sample_n(pts, n_points, sampling)
 
 
 PointCloudItem = Tuple[str, str, np.ndarray]  # (folder/class, file_path, cloud_np)
@@ -67,9 +69,10 @@ class TripletPointCloudDataset(Dataset):
     Basado 1:1 en el Colab.
     """
 
-    def __init__(self, all_point_clouds: List[PointCloudItem], n_points: int, train: bool = True):
+    def __init__(self, all_point_clouds: List[PointCloudItem], n_points: int, train: bool = True, sampling: str = "random"):
         self.n_points = n_points
         self.train = train
+        self.sampling = sampling
         self.items: List[Tuple[str, np.ndarray]] = []  # (cls, pts_norm)
         self.class_to_indices: Dict[str, List[int]] = {}
 
@@ -129,13 +132,13 @@ class TripletPointCloudDataset(Dataset):
         _, pts_n = self.items[idx_n]
 
         if self.train:
-            pa = augment(pts_a, self.n_points)
-            pp = augment(pts_p, self.n_points)
-            pn = augment(pts_n, self.n_points)
+            pa = augment(pts_a, self.n_points, self.sampling)
+            pp = augment(pts_p, self.n_points, self.sampling)
+            pn = augment(pts_n, self.n_points, self.sampling)
         else:
-            pa = sample_n(pts_a, self.n_points)
-            pp = sample_n(pts_p, self.n_points)
-            pn = sample_n(pts_n, self.n_points)
+            pa = sample_n(pts_a, self.n_points, self.sampling)
+            pp = sample_n(pts_p, self.n_points, self.sampling)
+            pn = sample_n(pts_n, self.n_points, self.sampling)
 
         # (N, 3) -> (3, N)
         return (
