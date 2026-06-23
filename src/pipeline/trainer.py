@@ -67,11 +67,12 @@ class TripletTrainingPipeline:
 
         self.exp_dir = os.path.join(runs_dir, timestamp)
         os.makedirs(self.exp_dir, exist_ok=True)
-        print(f"  [PROGRESO] Directorio de run: {self.exp_dir} ({time.perf_counter() - t0:.1f}s)", flush=True)
 
         self.config_path = os.path.join(self.exp_dir, "config.json")
         self.log_path = os.path.join(self.exp_dir, "training.log")
         self.csv_path = os.path.join(self.exp_dir, "metrics.csv")
+
+        self._log(f"  [PROGRESO] Directorio de run: {self.exp_dir} ({time.perf_counter() - t0:.1f}s)", console=True)
         self.best_model_path = os.path.join(self.exp_dir, "model_best.pt")
         self.checkpoint_last_path = os.path.join(self.exp_dir, "checkpoint_last.pt")
         self.splits_dir = os.path.join(self.exp_dir, "splits")
@@ -129,9 +130,9 @@ class TripletTrainingPipeline:
         self.train_clouds = train_clouds
         self.val_clouds = val_clouds
         self.test_clouds = test_clouds
-        print(
+        self._log(
             f"  [PROGRESO] Split train/val/test: {len(train_clouds)} / {len(val_clouds)} / {len(test_clouds)} ({(time.perf_counter() - t0):.1f}s)",
-            flush=True,
+            console=True,
         )
 
         train_paths = [p for _, p, _ in self.train_clouds]
@@ -171,7 +172,7 @@ class TripletTrainingPipeline:
         t0 = time.perf_counter()
         self.train_ds = TripletPointCloudDataset(self.train_clouds, n_points=n_points, train=True, sampling=sampling)
         self.val_ds = TripletPointCloudDataset(self.val_clouds, n_points=n_points, train=False, sampling=sampling)
-        print(f"  [PROGRESO] Datasets train/val creados ({time.perf_counter() - t0:.1f}s)", flush=True)
+        self._log(f"  [PROGRESO] Datasets train/val creados ({time.perf_counter() - t0:.1f}s)", console=True)
 
         t0 = time.perf_counter()
         self.train_loader = DataLoader(
@@ -190,7 +191,7 @@ class TripletTrainingPipeline:
             pin_memory=True,
             drop_last=False,
         )
-        print(f"  [PROGRESO] DataLoaders creados ({time.perf_counter() - t0:.1f}s)", flush=True)
+        self._log(f"  [PROGRESO] DataLoaders creados ({time.perf_counter() - t0:.1f}s)", console=True)
 
         # -----------------------------
         # MODEL
@@ -198,7 +199,7 @@ class TripletTrainingPipeline:
         t0 = time.perf_counter()
         self.model = model_class(width=width).to(device)
         params = sum(p.numel() for p in self.model.parameters())
-        print(f"  [PROGRESO] Modelo en {device} ({params} params) ({time.perf_counter() - t0:.1f}s)", flush=True)
+        self._log(f"  [PROGRESO] Modelo en {device} ({params} params) ({time.perf_counter() - t0:.1f}s)", console=True)
         self._log(f"Model parameters: {params}", console=True)
 
         # CSV header (solo si no existe o está vacío)
@@ -210,7 +211,7 @@ class TripletTrainingPipeline:
         t0 = time.perf_counter()
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lr)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs)
-        print(f"  [PROGRESO] Optimizer y scheduler listos ({time.perf_counter() - t0:.1f}s)", flush=True)
+        self._log(f"  [PROGRESO] Optimizer y scheduler listos ({time.perf_counter() - t0:.1f}s)", console=True)
 
         self.device = device
         self.margin = margin
