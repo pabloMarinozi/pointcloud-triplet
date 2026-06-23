@@ -110,7 +110,10 @@ def main():
     print(f"[PROGRESO] Pipeline listo en {time.perf_counter() - t_pipe:.1f}s", flush=True)
 
     print("[PROGRESO] Iniciando entrenamiento...", flush=True)
+    t_train = time.perf_counter()
     pipeline.train(resume=args.resume)
+    elapsed_train = time.perf_counter() - t_train
+    print(f"[PROGRESO] Entrenamiento: {elapsed_train:.1f}s", flush=True)
     print(f"[PROGRESO] Total pre+train: {time.perf_counter() - t0:.1f}s", flush=True)
 
 
