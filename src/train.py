@@ -10,14 +10,14 @@ import torch
 
 from src.data.io import find_ply_files, sample_point_cloud
 from src.models.triplet import TripletNet
-from src.pipeline.trainer import TripletTrainingPipeline
+from src.pipeline.trainer import LazyTripletTrainingPipeline, TripletTrainingPipeline
 from src.utils.seed import set_seed
 
 # Cadencia de progreso al cargar nubes (cada cuántos archivos se imprime).
 PROGRESS_EVERY_N_FILES = 5000
 
 
-def build_all_point_clouds(ply_dir: str, n_points: int):
+def build_all_point_clouds(ply_dir: str, n_points: int, sampling: str = "random"):
     """
     Replica el bloque del Colab:
     - encuentra PLYs recursivamente
@@ -36,7 +36,7 @@ def build_all_point_clouds(ply_dir: str, n_points: int):
     all_point_clouds = []
     for i, file_path in enumerate(files):
         folder = os.path.basename(os.path.dirname(file_path))
-        cloud = sample_point_cloud(file_path, n_points)
+        cloud = sample_point_cloud(file_path, n_points, sampling)
         all_point_clouds.append((folder, file_path, cloud))
         if (i + 1) % PROGRESS_EVERY_N_FILES == 0:
             elapsed = time.perf_counter() - t0
@@ -45,6 +45,16 @@ def build_all_point_clouds(ply_dir: str, n_points: int):
     elapsed = time.perf_counter() - t0
     print(f"[PROGRESO] Carga lista: {len(all_point_clouds)} nubes en {elapsed:.1f}s", flush=True)
     return all_point_clouds
+
+
+def discover_point_clouds(ply_dir: str):
+    t0 = time.perf_counter()
+    print("[PROGRESO] Descubriendo archivos .ply (recursivo, sin cargar a RAM)...", flush=True)
+    files = find_ply_files(ply_dir)
+    paths = [(os.path.basename(os.path.dirname(f)), f) for f in files]
+    elapsed = time.perf_counter() - t0
+    print(f"[PROGRESO] Encontrados {len(paths)} archivos .ply en {elapsed:.1f}s (solo paths)", flush=True)
+    return paths
 
 
 def parse_args():
@@ -64,6 +74,7 @@ def parse_args():
     p.add_argument("--clip_norm", type=float, default=1.0)
     p.add_argument("--val_size", type=float, default=0.15, help="Val ratio (train/val/test = 70/15/15 por defecto).")
     p.add_argument("--test_size", type=float, default=0.15, help="Test ratio.")
+    p.add_argument("--sampling", type=str, choices=["random", "fps", "fps_baya"], default="random", help="Estrategia de muestreo de puntos.")
     p.add_argument(
         "--early_stopping_patience",
         type=int,
@@ -71,6 +82,7 @@ def parse_args():
         metavar="N",
         help="Stop if val_loss does not improve for N epochs (default: disabled).",
     )
+    p.add_argument("--lazy", action="store_true", help="Usar lazy loading: las nubes se leen del disco en cada __getitem__. Por defecto (--eager) se precargan todas en RAM.")
 
     return p.parse_args()
 
@@ -83,11 +95,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[PROGRESO] Device: {device}", flush=True)
 
-    all_point_clouds = build_all_point_clouds(args.data_dir, args.n_points)
+    if args.lazy:
+        all_point_clouds = discover_point_clouds(args.data_dir)
+        PipelineClass = LazyTripletTrainingPipeline
+    else:
+        all_point_clouds = build_all_point_clouds(args.data_dir, args.n_points, args.sampling)
+        PipelineClass = TripletTrainingPipeline
 
     print("[PROGRESO] Creando pipeline (directorio, splits, datasets, dataloaders, modelo)...", flush=True)
     t_pipe = time.perf_counter()
-    pipeline = TripletTrainingPipeline(
+    pipeline = PipelineClass(
         all_point_clouds=all_point_clouds,
         model_class=TripletNet,
         n_points=args.n_points,
@@ -104,12 +121,22 @@ def main():
         test_size=args.test_size,
         run_name=args.run_name,
         early_stopping_patience=args.early_stopping_patience,
+        sampling=args.sampling,
     )
-    print(f"[PROGRESO] Pipeline listo en {time.perf_counter() - t_pipe:.1f}s", flush=True)
+    pipe_init_s = time.perf_counter() - t_pipe
+    print(f"[PROGRESO] Pipeline listo en {pipe_init_s:.1f}s", flush=True)
+    pipeline._log(f"[PROGRESO] Pipeline listo en {pipe_init_s:.1f}s")
 
     print("[PROGRESO] Iniciando entrenamiento...", flush=True)
+    pipeline._log("[PROGRESO] Iniciando entrenamiento...")
+    t_train = time.perf_counter()
     pipeline.train(resume=args.resume)
-    print(f"[PROGRESO] Total pre+train: {time.perf_counter() - t0:.1f}s", flush=True)
+    elapsed_train = time.perf_counter() - t_train
+    total_elapsed = time.perf_counter() - t0
+    print(f"[PROGRESO] Entrenamiento: {elapsed_train:.1f}s", flush=True)
+    pipeline._log(f"[PROGRESO] Entrenamiento: {elapsed_train:.1f}s")
+    print(f"[PROGRESO] Total pre+train: {total_elapsed:.1f}s", flush=True)
+    pipeline._log(f"[PROGRESO] Total pre+train: {total_elapsed:.1f}s")
 
 
 if __name__ == "__main__":

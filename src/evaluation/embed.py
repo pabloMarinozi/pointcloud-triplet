@@ -31,6 +31,7 @@ def embed_point_cloud_path(
     n_points: int,
     device: torch.device,
     use_augmentation: bool = False,
+    sampling: str = "random",
 ) -> np.ndarray:
     """
     Retorna embedding 1D (emb_dim,).
@@ -38,7 +39,7 @@ def embed_point_cloud_path(
     pts = read_points_from_ply(ply_path)
     pts = normalize_unit_sphere(pts).astype(np.float32)
 
-    pts_proc = augment(pts, n_points) if use_augmentation else sample_n(pts, n_points)
+    pts_proc = augment(pts, n_points, sampling) if use_augmentation else sample_n(pts, n_points, sampling)
     x = torch.from_numpy(pts_proc.T).unsqueeze(0).float().to(device)
 
     with torch.no_grad():

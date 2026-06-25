@@ -149,7 +149,7 @@ def get_train_split_path(exp_dir: str) -> str:
 def load_train_paths(train_split_path: str) -> List[str]:
     with open(train_split_path, "r", encoding="utf-8") as f:
         paths = json.load(f)
-    return list(paths)
+    return [_normalize(p) for p in paths]
 
 
 def build_train_set(dataset_index: Dict[str, str], train_paths: List[str]) -> List[Tuple[str, str]]:
@@ -174,16 +174,20 @@ def build_train_set(dataset_index: Dict[str, str], train_paths: List[str]) -> Li
     return out
 
 
+def _normalize(path: str) -> str:
+    return os.path.abspath(path.replace("\\", os.sep))
+
+
 def load_val_paths(val_split_path: str) -> List[str]:
     with open(val_split_path, "r", encoding="utf-8") as f:
         paths = json.load(f)
-    return [os.path.abspath(p) for p in paths]
+    return [_normalize(p) for p in paths]
 
 
 def load_test_paths(test_split_path: str) -> List[str]:
     with open(test_split_path, "r", encoding="utf-8") as f:
         paths = json.load(f)
-    return [os.path.abspath(p) for p in paths]
+    return [_normalize(p) for p in paths]
 
 
 def _path_key(path: str) -> Tuple[str, str]:

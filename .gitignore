@@ -13,6 +13,7 @@ env/
 
 # --- Experimentos y artefactos generados ---
 runs/
+dataset/
 *.pt
 *.pth
 *.npz
@@ -29,3 +30,4 @@ reporte_top5.txt
 # --- Sistema operativo ---
 .DS_Store
 Thumbs.db
+
