@@ -262,23 +262,23 @@ Basado en el comando paper-like del README (`--epochs 200 --batch_size 32 --lr 1
 ```bash
 # Eager (default) — precarga todas las nubes en RAM
 python -m src.train --data_dir "./dataset_ply" \
-  --n_points 512 --width 8 --batch_size 32 --lr 1e-4 --epochs 200 \
+  --n_points 512 --width 8 --batch_size 32 --lr 1e-4 --margin 0.5 --epochs 200 \
   --sampling random
 
 # Lazy — carga del disco en cada batch
 python -m src.train --data_dir "./dataset_ply" --lazy \
-  --n_points 512 --width 8 --batch_size 32 --lr 1e-4 --epochs 200 \
+  --n_points 512 --width 8 --batch_size 32 --lr 1e-4 --margin 0.5 --epochs 200 \
   --sampling random
 
 # Comparativa A/B
 python -m src.train --data_dir "./dataset_ply" \
   --run_name eager_w8_np512_bs32 \
-  --n_points 512 --width 8 --batch_size 32 --lr 1e-4 --epochs 200 \
+  --n_points 512 --width 8 --batch_size 32 --lr 1e-4 --margin 0.5 --epochs 200 \
   --sampling random
 
 python -m src.train --data_dir "./dataset_ply" --lazy \
   --run_name lazy_w8_np512_bs32 \
-  --n_points 512 --width 8 --batch_size 32 --lr 1e-4 --epochs 200 \
+  --n_points 512 --width 8 --batch_size 32 --lr 1e-4 --margin 0.5 --epochs 200 \
   --sampling random
 ```
 
