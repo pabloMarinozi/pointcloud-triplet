@@ -10,7 +10,7 @@ import torch
 
 from src.data.io import find_ply_files, sample_point_cloud
 from src.models.triplet import TripletNet
-from src.pipeline.trainer import TripletTrainingPipeline
+from src.pipeline.trainer import LazyTripletTrainingPipeline, TripletTrainingPipeline
 from src.utils.seed import set_seed
 
 # Cadencia de progreso al cargar nubes (cada cuántos archivos se imprime).
@@ -47,6 +47,16 @@ def build_all_point_clouds(ply_dir: str, n_points: int, sampling: str = "random"
     return all_point_clouds
 
 
+def discover_point_clouds(ply_dir: str):
+    t0 = time.perf_counter()
+    print("[PROGRESO] Descubriendo archivos .ply (recursivo, sin cargar a RAM)...", flush=True)
+    files = find_ply_files(ply_dir)
+    paths = [(os.path.basename(os.path.dirname(f)), f) for f in files]
+    elapsed = time.perf_counter() - t0
+    print(f"[PROGRESO] Encontrados {len(paths)} archivos .ply en {elapsed:.1f}s (solo paths)", flush=True)
+    return paths
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Train TripletNet on 3D point clouds (.ply).")
     p.add_argument("--data_dir", type=str, required=True, help="Directorio raíz con .ply (recursivo).")
@@ -72,6 +82,7 @@ def parse_args():
         metavar="N",
         help="Stop if val_loss does not improve for N epochs (default: disabled).",
     )
+    p.add_argument("--lazy", action="store_true", help="Usar lazy loading: las nubes se leen del disco en cada __getitem__. Por defecto (--eager) se precargan todas en RAM.")
 
     return p.parse_args()
 
@@ -84,11 +95,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[PROGRESO] Device: {device}", flush=True)
 
-    all_point_clouds = build_all_point_clouds(args.data_dir, args.n_points, args.sampling)
+    if args.lazy:
+        all_point_clouds = discover_point_clouds(args.data_dir)
+        PipelineClass = LazyTripletTrainingPipeline
+    else:
+        all_point_clouds = build_all_point_clouds(args.data_dir, args.n_points, args.sampling)
+        PipelineClass = TripletTrainingPipeline
 
     print("[PROGRESO] Creando pipeline (directorio, splits, datasets, dataloaders, modelo)...", flush=True)
     t_pipe = time.perf_counter()
-    pipeline = TripletTrainingPipeline(
+    pipeline = PipelineClass(
         all_point_clouds=all_point_clouds,
         model_class=TripletNet,
         n_points=args.n_points,
@@ -107,14 +123,20 @@ def main():
         early_stopping_patience=args.early_stopping_patience,
         sampling=args.sampling,
     )
-    print(f"[PROGRESO] Pipeline listo en {time.perf_counter() - t_pipe:.1f}s", flush=True)
+    pipe_init_s = time.perf_counter() - t_pipe
+    print(f"[PROGRESO] Pipeline listo en {pipe_init_s:.1f}s", flush=True)
+    pipeline._log(f"[PROGRESO] Pipeline listo en {pipe_init_s:.1f}s")
 
     print("[PROGRESO] Iniciando entrenamiento...", flush=True)
+    pipeline._log("[PROGRESO] Iniciando entrenamiento...")
     t_train = time.perf_counter()
     pipeline.train(resume=args.resume)
     elapsed_train = time.perf_counter() - t_train
+    total_elapsed = time.perf_counter() - t0
     print(f"[PROGRESO] Entrenamiento: {elapsed_train:.1f}s", flush=True)
-    print(f"[PROGRESO] Total pre+train: {time.perf_counter() - t0:.1f}s", flush=True)
+    pipeline._log(f"[PROGRESO] Entrenamiento: {elapsed_train:.1f}s")
+    print(f"[PROGRESO] Total pre+train: {total_elapsed:.1f}s", flush=True)
+    pipeline._log(f"[PROGRESO] Total pre+train: {total_elapsed:.1f}s")
 
 
 if __name__ == "__main__":

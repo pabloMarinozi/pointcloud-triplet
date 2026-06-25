@@ -58,7 +58,7 @@ class TripletTrainingPipeline:
         early_stopping_patience: int | None = None,
         sampling: str = "random",
     ):
-        t0 = time.perf_counter()
+        self._t_init = time.perf_counter()
         self.start_time = datetime.now()
         if run_name is not None:
             timestamp = run_name
@@ -72,7 +72,7 @@ class TripletTrainingPipeline:
         self.log_path = os.path.join(self.exp_dir, "training.log")
         self.csv_path = os.path.join(self.exp_dir, "metrics.csv")
 
-        self._log(f"  [PROGRESO] Directorio de run: {self.exp_dir} ({time.perf_counter() - t0:.1f}s)", console=True)
+        self._log(f"  [PROGRESO] Directorio de run: {self.exp_dir} ({time.perf_counter() - self._t_init:.1f}s)", console=True)
         self.best_model_path = os.path.join(self.exp_dir, "model_best.pt")
         self.checkpoint_last_path = os.path.join(self.exp_dir, "checkpoint_last.pt")
         self.splits_dir = os.path.join(self.exp_dir, "splits")
@@ -206,7 +206,7 @@ class TripletTrainingPipeline:
         if not os.path.exists(self.csv_path) or os.path.getsize(self.csv_path) == 0:
             with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["epoch", "train_loss", "val_loss", "lr"])
+                writer.writerow(["epoch", "train_loss", "val_loss", "lr", "train_s", "val_s", "epoch_s", "total_s"])
 
         t0 = time.perf_counter()
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lr)
@@ -222,6 +222,8 @@ class TripletTrainingPipeline:
         self.epochs_without_improvement = 0
 
         self.scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
+
+        self._log(f"  [INIT] Pipeline inicializado en {time.perf_counter() - self._t_init:.1f}s", console=True)
 
     def _log(self, text: str, console: bool = False) -> None:
         with open(self.log_path, "a", encoding="utf-8") as f:
@@ -317,6 +319,7 @@ class TripletTrainingPipeline:
             resume: Si True, intenta cargar un checkpoint existente y continuar desde ahí.
         """
         start_epoch = 1
+        self._t_train_start = time.perf_counter()
 
         if resume:
             loaded_epoch = self._load_checkpoint()
@@ -330,6 +333,7 @@ class TripletTrainingPipeline:
                     return
 
         for epoch in range(start_epoch, self.epochs + 1):
+            t_epoch_start = time.perf_counter()
             epoch_success = False
             retry_count = 0
             early_stop_triggered = False
@@ -361,6 +365,7 @@ class TripletTrainingPipeline:
                 train_loss_sum = 0.0
                 train_count = 0
                 self.model.train()
+                t_train_start = time.perf_counter()
 
                 # ----- TRAIN -----
                 for batch_idx, (pa, pp, pn) in enumerate(self.train_loader):
@@ -410,9 +415,12 @@ class TripletTrainingPipeline:
                     train_count += pa.size(0)
 
                 train_loss = train_loss_sum / max(train_count, 1)
+                t_train_end = time.perf_counter()
+                train_elapsed = t_train_end - t_train_start
 
                 # ----- VAL -----
                 self.model.eval()
+                t_val_start = time.perf_counter()
                 val_loss_sum = 0.0
                 val_count = 0
 
@@ -426,6 +434,10 @@ class TripletTrainingPipeline:
                             val_count += pa.size(0)
 
                 val_loss = val_loss_sum / max(val_count, 1)
+                t_val_end = time.perf_counter()
+                val_elapsed = t_val_end - t_val_start
+                epoch_elapsed = t_val_end - t_epoch_start
+                total_elapsed = t_val_end - self._t_train_start
 
                 # Decidir si la época fue aceptable o hay que hacer retry
                 need_retry = skip_count >= NAN_SKIP_THRESHOLD or not math.isfinite(val_loss)
@@ -451,9 +463,10 @@ class TripletTrainingPipeline:
 
                 with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow([epoch, train_loss, val_loss, lr])
+                    writer.writerow([epoch, train_loss, val_loss, lr, round(train_elapsed, 2), round(val_elapsed, 2), round(epoch_elapsed, 2), round(total_elapsed, 2)])
 
-                msg = f"[{epoch:02d}] train={train_loss:.6f}  val={val_loss:.6f}  lr={lr:.3e}"
+                msg = f"[{epoch:02d}/{self.epochs}] train={train_loss:.6f}  val={val_loss:.6f}  lr={lr:.3e}"
+                msg += f"  |  T:{train_elapsed:.1f}s  V:{val_elapsed:.1f}s  ep:{epoch_elapsed:.1f}s  total:{total_elapsed:.1f}s"
                 if skip_count > 0:
                     msg += f"  (skipped={skip_count})"
                 self._log(msg, console=True)
@@ -486,7 +499,8 @@ class TripletTrainingPipeline:
             if early_stop_triggered:
                 break
 
-        self._log(f"Training finished. Best val_loss = {self.best_val:.6f}", console=True)
+        total_train_time = time.perf_counter() - self._t_train_start
+        self._log(f"Training finished. Best val_loss = {self.best_val:.6f}  total_time={total_train_time:.1f}s", console=True)
 
         # Marcar hasta qué época se entrenó (para carpetas de evaluación ep<N>)
         last_epoch_path = os.path.join(self.exp_dir, "last_epoch.json")
@@ -494,3 +508,183 @@ class TripletTrainingPipeline:
             json.dump({"epoch": epoch}, f, indent=2)
 
         return self.model
+
+
+class LazyTripletTrainingPipeline(TripletTrainingPipeline):
+
+    def __init__(
+        self,
+        all_point_clouds,
+        model_class,
+        n_points: int,
+        width: int,
+        batch_size: int,
+        lr: float,
+        margin: float,
+        epochs: int,
+        clip_norm: float,
+        seed: int,
+        device: torch.device,
+        runs_dir: str = "runs",
+        val_size: float = 0.15,
+        test_size: float = 0.15,
+        run_name: str | None = None,
+        early_stopping_patience: int | None = None,
+        sampling: str = "random",
+    ):
+        from src.data.dataset import LazyTripletPointCloudDataset
+
+        self._t_init = time.perf_counter()
+        self.start_time = datetime.now()
+        if run_name is not None:
+            timestamp = run_name
+        else:
+            timestamp = self.start_time.strftime("run_%Y-%m-%d_%H-%M-%S")
+
+        self.exp_dir = os.path.join(runs_dir, timestamp)
+        os.makedirs(self.exp_dir, exist_ok=True)
+
+        self.config_path = os.path.join(self.exp_dir, "config.json")
+        self.log_path = os.path.join(self.exp_dir, "training.log")
+        self.csv_path = os.path.join(self.exp_dir, "metrics.csv")
+
+        self._log(f"  [PROGRESO] Directorio de run: {self.exp_dir} ({time.perf_counter() - self._t_init:.1f}s)", console=True)
+        self.best_model_path = os.path.join(self.exp_dir, "model_best.pt")
+        self.checkpoint_last_path = os.path.join(self.exp_dir, "checkpoint_last.pt")
+        self.splits_dir = os.path.join(self.exp_dir, "splits")
+        os.makedirs(self.splits_dir, exist_ok=True)
+        self.train_split_path = os.path.join(self.splits_dir, "train_paths.json")
+        self.val_split_path = os.path.join(self.splits_dir, "val_paths.json")
+        self.test_split_path = os.path.join(self.splits_dir, "test_paths.json")
+
+        self.n_points = n_points
+        self.sampling = sampling
+
+        config = {
+            "start_datetime": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "n_points": n_points,
+            "width": width,
+            "batch_size": batch_size,
+            "lr": lr,
+            "margin": margin,
+            "epochs": epochs,
+            "clip_norm": clip_norm,
+            "seed": seed,
+            "device": str(device),
+            "total_clouds": len(all_point_clouds),
+            "val_size": val_size,
+            "test_size": test_size,
+            "early_stopping_patience": early_stopping_patience,
+            "sampling": sampling,
+            "lazy": True,
+        }
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+
+        self._log(f"Experiment directory: {self.exp_dir}", console=True)
+        self._log(f"Start time: {config['start_datetime']}", console=True)
+        self._log(f"Using n_points = {n_points}", console=True)
+        self._log(f"Using width    = {width}", console=True)
+
+        t0 = time.perf_counter()
+        folders = sorted(list(set(f for f, _ in all_point_clouds)))
+
+        train_clouds, val_clouds, test_clouds = [], [], []
+        for folder in folders:
+            class_clouds = [x for x in all_point_clouds if x[0] == folder]
+            train_val, test = train_test_split(class_clouds, test_size=test_size, random_state=seed)
+            val_ratio = val_size / (1.0 - test_size)
+            tr, va = train_test_split(train_val, test_size=val_ratio, random_state=seed)
+            train_clouds.extend(tr)
+            val_clouds.extend(va)
+            test_clouds.extend(test)
+
+        self.train_clouds = train_clouds
+        self.val_clouds = val_clouds
+        self.test_clouds = test_clouds
+        self._log(
+            f"  [PROGRESO] Split train/val/test: {len(train_clouds)} / {len(val_clouds)} / {len(test_clouds)} ({(time.perf_counter() - t0):.1f}s)",
+            console=True,
+        )
+
+        train_paths = [p for _, p in self.train_clouds]
+        val_paths = [p for _, p in self.val_clouds]
+        test_paths = [p for _, p in self.test_clouds]
+
+        if not os.path.exists(self.train_split_path):
+            with open(self.train_split_path, "w", encoding="utf-8") as f:
+                json.dump(train_paths, f, indent=4)
+            self._log(f"Saved train split to {self.train_split_path}", console=True)
+        else:
+            self._log(f"Train split already exists, keeping existing: {self.train_split_path}", console=True)
+
+        if not os.path.exists(self.val_split_path):
+            with open(self.val_split_path, "w", encoding="utf-8") as f:
+                json.dump(val_paths, f, indent=4)
+            self._log(f"Saved val split   to {self.val_split_path}", console=True)
+        else:
+            self._log(f"Val split already exists, keeping existing: {self.val_split_path}", console=True)
+
+        if not os.path.exists(self.test_split_path):
+            with open(self.test_split_path, "w", encoding="utf-8") as f:
+                json.dump(test_paths, f, indent=4)
+            self._log(f"Saved test split  to {self.test_split_path}", console=True)
+        else:
+            self._log(f"Test split already exists, keeping existing: {self.test_split_path}", console=True)
+
+        self._log(f"Train clouds: {len(train_clouds)}", console=True)
+        self._log(f"Val clouds:   {len(val_clouds)}", console=True)
+        self._log(f"Test clouds:  {len(test_clouds)}", console=True)
+        self._log(f"Classes:      {len(folders)}", console=True)
+
+        t0 = time.perf_counter()
+        self.train_ds = LazyTripletPointCloudDataset(self.train_clouds, n_points=n_points, train=True, sampling=sampling)
+        self.val_ds = LazyTripletPointCloudDataset(self.val_clouds, n_points=n_points, train=False, sampling=sampling)
+        self._log(f"  [PROGRESO] Datasets train/val creados ({time.perf_counter() - t0:.1f}s)", console=True)
+
+        t0 = time.perf_counter()
+        self.train_loader = DataLoader(
+            self.train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True,
+            drop_last=True,
+        )
+        self.val_loader = DataLoader(
+            self.val_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True,
+            drop_last=False,
+        )
+        self._log(f"  [PROGRESO] DataLoaders creados ({time.perf_counter() - t0:.1f}s)", console=True)
+
+        t0 = time.perf_counter()
+        self.model = model_class(width=width).to(device)
+        params = sum(p.numel() for p in self.model.parameters())
+        self._log(f"  [PROGRESO] Modelo en {device} ({params} params) ({time.perf_counter() - t0:.1f}s)", console=True)
+        self._log(f"Model parameters: {params}", console=True)
+
+        if not os.path.exists(self.csv_path) or os.path.getsize(self.csv_path) == 0:
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "train_loss", "val_loss", "lr", "train_s", "val_s", "epoch_s", "total_s"])
+
+        t0 = time.perf_counter()
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=lr)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs)
+        self._log(f"  [PROGRESO] Optimizer y scheduler listos ({time.perf_counter() - t0:.1f}s)", console=True)
+
+        self.device = device
+        self.margin = margin
+        self.epochs = epochs
+        self.clip_norm = clip_norm
+        self.best_val = float("inf")
+        self.early_stopping_patience = early_stopping_patience
+        self.epochs_without_improvement = 0
+
+        self.scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
+
+        self._log(f"  [INIT] Pipeline lazy inicializado en {time.perf_counter() - self._t_init:.1f}s", console=True)
