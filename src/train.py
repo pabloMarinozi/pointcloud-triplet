@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from datetime import datetime
 from typing import List, Tuple
 
 import numpy as np
@@ -18,20 +19,13 @@ PROGRESS_EVERY_N_FILES = 5000
 
 
 def build_all_point_clouds(ply_dir: str, n_points: int, sampling: str = "random"):
-    """
-    Replica el bloque del Colab:
-    - encuentra PLYs recursivamente
-    - define clase = nombre de la carpeta contenedora
-    - samplea n_points por nube
-    Retorna lista: (folder, file_path, cloud_np)
-    """
     t0 = time.perf_counter()
-    print("[PROGRESO] Buscando archivos .ply (recursivo)...", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Buscando archivos .ply (recursivo)...", flush=True)
     files = find_ply_files(ply_dir)
     elapsed = time.perf_counter() - t0
-    print(f"[PROGRESO] Encontrados {len(files)} archivos .ply en {elapsed:.1f}s", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Encontrados {len(files)} archivos .ply en {elapsed:.1f}s", flush=True)
 
-    print(f"[PROGRESO] Cargando y sampleando nubes (n_points={n_points})...", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Sampleando nubes (n_points={n_points}, sampling={sampling})...", flush=True)
     t0 = time.perf_counter()
     all_point_clouds = []
     for i, file_path in enumerate(files):
@@ -40,20 +34,20 @@ def build_all_point_clouds(ply_dir: str, n_points: int, sampling: str = "random"
         all_point_clouds.append((folder, file_path, cloud))
         if (i + 1) % PROGRESS_EVERY_N_FILES == 0:
             elapsed = time.perf_counter() - t0
-            print(f"  ... {i + 1}/{len(files)} nubes cargadas ({elapsed:.1f}s)", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}]   ... {i + 1}/{len(files)} nubes cargadas ({elapsed:.1f}s)", flush=True)
 
     elapsed = time.perf_counter() - t0
-    print(f"[PROGRESO] Carga lista: {len(all_point_clouds)} nubes en {elapsed:.1f}s", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Carga completa: {len(all_point_clouds)} nubes en {elapsed:.1f}s", flush=True)
     return all_point_clouds
 
 
 def discover_point_clouds(ply_dir: str):
     t0 = time.perf_counter()
-    print("[PROGRESO] Descubriendo archivos .ply (recursivo, sin cargar a RAM)...", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Descubriendo archivos .ply (solo paths)...", flush=True)
     files = find_ply_files(ply_dir)
     paths = [(os.path.basename(os.path.dirname(f)), f) for f in files]
     elapsed = time.perf_counter() - t0
-    print(f"[PROGRESO] Encontrados {len(paths)} archivos .ply en {elapsed:.1f}s (solo paths)", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Encontrados {len(paths)} paths en {elapsed:.1f}s", flush=True)
     return paths
 
 
@@ -83,26 +77,38 @@ def parse_args():
         help="Stop if val_loss does not improve for N epochs (default: disabled).",
     )
     p.add_argument("--lazy", action="store_true", help="Usar lazy loading: las nubes se leen del disco en cada __getitem__. Por defecto (--eager) se precargan todas en RAM.")
+    p.add_argument("--save_sampled", action="store_true", help="Guardar los puntos sampleados como .ply en experiments/sampling/<run>+<archivo>.")
 
     return p.parse_args()
 
 
 def main():
     t0 = time.perf_counter()
+
+    def ts_print(msg: str) -> None:
+        elapsed = time.perf_counter() - t0
+        now = datetime.now().strftime("%H:%M:%S")
+        print(f"[{now} +{elapsed:.1f}s] {msg}", flush=True)
+
     args = parse_args()
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[PROGRESO] Device: {device}", flush=True)
+    ts_print(f"Device: {device}")
+
+    ts_print(f"Seed: {args.seed}")
+    ts_print(f"Modo: {'lazy' if args.lazy else 'eager'}")
 
     if args.lazy:
+        ts_print("Descubriendo archivos .ply (solo paths, sin cargar a RAM)...")
         all_point_clouds = discover_point_clouds(args.data_dir)
         PipelineClass = LazyTripletTrainingPipeline
     else:
+        ts_print(f"Cargando y sampleando nubes (n_points={args.n_points}, sampling={args.sampling})...")
         all_point_clouds = build_all_point_clouds(args.data_dir, args.n_points, args.sampling)
         PipelineClass = TripletTrainingPipeline
 
-    print("[PROGRESO] Creando pipeline (directorio, splits, datasets, dataloaders, modelo)...", flush=True)
+    ts_print("Creando pipeline (splits, datasets, dataloaders, modelo)...")
     t_pipe = time.perf_counter()
     pipeline = PipelineClass(
         all_point_clouds=all_point_clouds,
@@ -122,21 +128,22 @@ def main():
         run_name=args.run_name,
         early_stopping_patience=args.early_stopping_patience,
         sampling=args.sampling,
+        save_sampled=args.save_sampled,
     )
     pipe_init_s = time.perf_counter() - t_pipe
-    print(f"[PROGRESO] Pipeline listo en {pipe_init_s:.1f}s", flush=True)
-    pipeline._log(f"[PROGRESO] Pipeline listo en {pipe_init_s:.1f}s")
+    ts_print(f"Pipeline listo en {pipe_init_s:.1f}s")
+    pipeline._log(f"Pipeline listo en {pipe_init_s:.1f}s")
 
-    print("[PROGRESO] Iniciando entrenamiento...", flush=True)
-    pipeline._log("[PROGRESO] Iniciando entrenamiento...")
+    ts_print("Iniciando entrenamiento...")
+    pipeline._log("Iniciando entrenamiento...")
     t_train = time.perf_counter()
     pipeline.train(resume=args.resume)
     elapsed_train = time.perf_counter() - t_train
     total_elapsed = time.perf_counter() - t0
-    print(f"[PROGRESO] Entrenamiento: {elapsed_train:.1f}s", flush=True)
-    pipeline._log(f"[PROGRESO] Entrenamiento: {elapsed_train:.1f}s")
-    print(f"[PROGRESO] Total pre+train: {total_elapsed:.1f}s", flush=True)
-    pipeline._log(f"[PROGRESO] Total pre+train: {total_elapsed:.1f}s")
+    ts_print(f"Entrenamiento finalizado: {elapsed_train:.1f}s")
+    pipeline._log(f"Entrenamiento finalizado: {elapsed_train:.1f}s")
+    ts_print(f"Total script (pre+train): {total_elapsed:.1f}s")
+    pipeline._log(f"Total script (pre+train): {total_elapsed:.1f}s")
 
 
 if __name__ == "__main__":

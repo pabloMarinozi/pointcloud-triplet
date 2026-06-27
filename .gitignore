@@ -13,6 +13,10 @@ env/
 
 # --- Experimentos y artefactos generados ---
 runs/
+mlruns/
+experiments/scripts/
+experiments/logs/
+experiments/sampling/
 dataset/
 *.pt
 *.pth
