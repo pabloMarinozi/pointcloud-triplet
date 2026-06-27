@@ -180,6 +180,7 @@ python -m src.train --data_dir "./dataset_ply" --n_points 2048 --width 64 --epoc
 * `--batch_size`: tamaño de batch
 * `--margin`: margen de Triplet Loss (paper-like: **0.5**)
 * `--sampling`: estrategia de muestreo de puntos (`random` por defecto, `fps` para Farthest Point Sampling global, `fps_baya` para FPS por baya individual)
+* `--save_sampled`: guarda los puntos sampleados como `.ply` en `experiments/sampling/<run>+<archivo>.ply`
 
 Ejemplo paper-like:
 

@@ -57,6 +57,7 @@ class TripletTrainingPipeline:
         run_name: str | None = None,
         early_stopping_patience: int | None = None,
         sampling: str = "random",
+        save_sampled: bool = False,
     ):
         self._t_init = time.perf_counter()
         self.start_time = datetime.now()
@@ -100,6 +101,7 @@ class TripletTrainingPipeline:
             "test_size": test_size,
             "early_stopping_patience": early_stopping_patience,
             "sampling": sampling,
+            "save_sampled": save_sampled,
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -108,6 +110,9 @@ class TripletTrainingPipeline:
         self._log(f"Start time: {config['start_datetime']}", console=True)
         self._log(f"Using n_points = {n_points}", console=True)
         self._log(f"Using width    = {width}", console=True)
+
+        if save_sampled:
+            self._save_sampled_clouds(all_point_clouds, timestamp)
 
         # -----------------------------
         # DATASET SPLIT 70/15/15 (train/val/test, estratificado por carpeta)
@@ -225,11 +230,60 @@ class TripletTrainingPipeline:
 
         self._log(f"  [INIT] Pipeline inicializado en {time.perf_counter() - self._t_init:.1f}s", console=True)
 
+    def _save_sampled_clouds(self, all_point_clouds: list, timestamp: str) -> None:
+        import open3d as o3d
+        from src.data.io import sample_point_cloud
+
+        sampled_dir = os.path.join("experiments", "sampling")
+        os.makedirs(sampled_dir, exist_ok=True)
+
+        saved_count = 0
+
+        unique_paths = list(dict.fromkeys(item[1] for item in all_point_clouds))
+        total = len(unique_paths)
+
+        self._log(
+            f"  [PROGRESO] Sampleando y guardando {total} PLYs en {sampled_dir}/ ...",
+            console=True,
+        )
+
+        path_to_cloud = {}
+        for item in all_point_clouds:
+            if len(item) == 3 and item[1] not in path_to_cloud:
+                path_to_cloud[item[1]] = item[2]
+
+        for file_path in unique_paths:
+            cloud_np = path_to_cloud.get(file_path)
+            if cloud_np is None:
+                cloud_np = sample_point_cloud(file_path, self.n_points, self.sampling)
+
+            base_name = os.path.basename(file_path)
+            out_name = f"{timestamp}+{base_name}"
+            out_path = os.path.join(sampled_dir, out_name)
+            pcd_o3d = o3d.geometry.PointCloud()
+            pcd_o3d.points = o3d.utility.Vector3dVector(cloud_np)
+            o3d.io.write_point_cloud(out_path, pcd_o3d, write_ascii=True)
+            saved_count += 1
+
+            if saved_count % 500 == 0 or saved_count == total:
+                self._log(
+                    f"  [PROGRESO]   ... {saved_count}/{total} PLYs sampleados",
+                    console=True,
+                )
+
+        self._log(
+            f"[SAMPLED] Saved {saved_count} sampled PLYs to {sampled_dir}/",
+            console=True,
+        )
+
     def _log(self, text: str, console: bool = False) -> None:
+        elapsed = time.perf_counter() - self._t_init
+        now = datetime.now().strftime("%H:%M:%S")
+        line = f"[{now} +{elapsed:.1f}s] {text}"
         with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(text + "\n")
+            f.write(line + "\n")
         if console:
-            print(text)
+            print(line, flush=True)
 
     def _save_checkpoint(self, epoch: int, train_loss: float, val_loss: float, lr: float):
         """Guarda un checkpoint completo con todo el estado necesario para reanudar."""
@@ -334,6 +388,7 @@ class TripletTrainingPipeline:
 
         for epoch in range(start_epoch, self.epochs + 1):
             t_epoch_start = time.perf_counter()
+            self._log(f"[EPOCH] epoch={epoch} start", console=True)
             epoch_success = False
             retry_count = 0
             early_stop_triggered = False
@@ -531,6 +586,7 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
         run_name: str | None = None,
         early_stopping_patience: int | None = None,
         sampling: str = "random",
+        save_sampled: bool = False,
     ):
         from src.data.dataset import LazyTripletPointCloudDataset
 
@@ -577,6 +633,7 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
             "early_stopping_patience": early_stopping_patience,
             "sampling": sampling,
             "lazy": True,
+            "save_sampled": save_sampled,
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -585,6 +642,9 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
         self._log(f"Start time: {config['start_datetime']}", console=True)
         self._log(f"Using n_points = {n_points}", console=True)
         self._log(f"Using width    = {width}", console=True)
+
+        if save_sampled:
+            self._save_sampled_clouds(all_point_clouds, timestamp)
 
         t0 = time.perf_counter()
         folders = sorted(list(set(f for f, _ in all_point_clouds)))

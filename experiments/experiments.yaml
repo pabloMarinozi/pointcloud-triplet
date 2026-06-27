@@ -1,0 +1,64 @@
+experiment_name: pointcloud-triplet
+
+defaults:
+  data_dir: "./dataset"
+  runs_dir: "runs"
+  val_size: 0.15
+  test_size: 0.15
+  n_points: 512
+  width: 8
+  epochs: 200
+  batch_size: 16
+  lr: 0.0003
+  margin: 0.5
+  clip_norm: 1.0
+  seed: 42
+  sampling: random
+  lazy: false
+
+runs:
+
+  - width: 8
+    lr: 0.0003
+    epochs: 1
+    lazy: true
+    sampling: fps_baya
+    save_sampled: true
+
+  - width: 8
+    lr: 0.0003
+    epochs: 10
+    lazy: true
+  
+  - width: 8
+    lr: 0.0003
+    epochs: 10
+    lazy: false
+
+  - width: 8
+    lr: 0.0003
+    epochs: 10
+    lazy: false
+    sampling: fps_baya
+
+  - width: 8
+    lr: 0.0003
+    epochs: 10
+    lazy: true
+    sampling: fps_baya
+
+  - width: 8
+    lr: 0.0003
+    epochs: 10
+    lazy: false
+    sampling: fps
+
+  - width: 8
+    lr: 0.0003
+    epochs: 10
+    lazy: true
+    sampling: fps
+
+mlflow:
+  tracking_uri: "sqlite:///mlruns/mlflow.db"
+  log_system_metrics: true
