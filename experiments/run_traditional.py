@@ -22,9 +22,46 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from mlflow_setup.tracker import build_run_name, load_yaml_config, merge_config
-
 OUTPUT_DIR = _REPO_ROOT / "experiments" / "scripts"
+
+
+def load_yaml_config(yaml_path: str) -> dict:
+    """Carga el archivo YAML de experimentos."""
+    try:
+        import yaml
+    except ImportError:
+        raise ImportError(
+            "PyYAML es necesario para leer experiments.yaml. Instalalo con: pip install pyyaml"
+        )
+
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def merge_config(defaults: dict, run_cfg: dict) -> dict:
+    """Mezcla defaults con overrides del run. Los valores None se ignoran."""
+    merged = dict(defaults)
+    for key, value in run_cfg.items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def build_run_name(cfg: dict) -> str:
+    """Genera un nombre de run determinístico concatenando todos los hiperparámetros."""
+    lr_str = f"{cfg['lr']:.0e}".replace("e-0", "e-").replace("e+0", "e+").replace(".0e", "e")
+    mode = "lazy" if cfg.get("lazy") else "eager"
+    sampling = cfg.get("sampling", "random")
+    return (
+        f"np{cfg['n_points']}"
+        f"_w{cfg['width']}"
+        f"_ep{cfg['epochs']}"
+        f"_bs{cfg['batch_size']}"
+        f"_lr{lr_str}"
+        f"_m{cfg['margin']}"
+        f"_{sampling}"
+        f"_{mode}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
