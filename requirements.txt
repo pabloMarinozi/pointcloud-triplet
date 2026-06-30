@@ -19,3 +19,4 @@ scikit-learn==1.7.2
 open3d==0.19.0
 pandas==2.3.3
 tqdm==4.67.1
+psutil==7.1.3

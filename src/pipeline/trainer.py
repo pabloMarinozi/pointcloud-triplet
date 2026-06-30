@@ -276,6 +276,19 @@ class TripletTrainingPipeline:
             console=True,
         )
 
+    def _start_monitor(self):
+        try:
+            from src.utils.monitor import SystemMonitor
+
+            csv_path = os.path.join(self.exp_dir, "system_metrics.csv")
+            monitor = SystemMonitor(csv_path, interval=5.0)
+            monitor.start()
+            self._log("System monitor started (psutil + nvml)", console=True)
+            return monitor
+        except Exception:
+            self._log("System monitor unavailable (psutil not installed)", console=False)
+            return None
+
     def _log(self, text: str, console: bool = False) -> None:
         elapsed = time.perf_counter() - self._t_init
         now = datetime.now().strftime("%H:%M:%S")
@@ -385,6 +398,8 @@ class TripletTrainingPipeline:
                         console=True,
                     )
                     return
+
+        monitor = self._start_monitor()
 
         for epoch in range(start_epoch, self.epochs + 1):
             t_epoch_start = time.perf_counter()
@@ -555,6 +570,14 @@ class TripletTrainingPipeline:
                 break
 
         total_train_time = time.perf_counter() - self._t_train_start
+
+        if monitor is not None:
+            monitor.stop()
+            self._log(
+                f"System metrics saved to {os.path.join(self.exp_dir, 'system_metrics.csv')}",
+                console=True,
+            )
+
         self._log(f"Training finished. Best val_loss = {self.best_val:.6f}  total_time={total_train_time:.1f}s", console=True)
 
         # Marcar hasta qué época se entrenó (para carpetas de evaluación ep<N>)
