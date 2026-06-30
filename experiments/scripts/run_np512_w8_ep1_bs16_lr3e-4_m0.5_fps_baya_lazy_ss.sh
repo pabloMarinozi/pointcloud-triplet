@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run: np512_w8_ep1_bs16_lr3e-4_m0.5_fps_baya_lazy
+# Run: np512_w8_ep1_bs16_lr3e-4_m0.5_fps_baya_lazy_ss
 # Generado por experiments/run_traditional.py
 #
 set -euo pipefail
@@ -10,9 +10,9 @@ cd "$REPO_ROOT"
 
 LOG_DATE=$(date +%Y-%m-%d)
 mkdir -p "$REPO_ROOT/experiments/logs/$LOG_DATE"
-LOGFILE="$REPO_ROOT/experiments/logs/$LOG_DATE/run_np512_w8_ep1_bs16_lr3e-4_m0.5_fps_baya_lazy.log"
+LOGFILE="$REPO_ROOT/experiments/logs/$LOG_DATE/run_np512_w8_ep1_bs16_lr3e-4_m0.5_fps_baya_lazy_ss.log"
 SCRIPT_START=$(date +%s)
-echo "[$(date '+%H:%M:%S') +0.0s] Iniciando run: np512_w8_ep1_bs16_lr3e-4_m0.5_fps_baya_lazy" | tee "$LOGFILE"
+echo "[$(date '+%H:%M:%S') +0.0s] Iniciando run: np512_w8_ep1_bs16_lr3e-4_m0.5_fps_baya_lazy_ss" | tee "$LOGFILE"
 echo "" | tee -a "$LOGFILE"
 
 export PYTHONUNBUFFERED=1
@@ -20,7 +20,7 @@ set +o pipefail
 python -u -m src.train \
   --data_dir ./dataset \
   --runs_dir runs \
-  --run_name np512_w8_ep1_bs16_lr3e-4_m0.5_fps_baya_lazy \
+  --run_name np512_w8_ep1_bs16_lr3e-4_m0.5_fps_baya_lazy_ss \
   --n_points 512 \
   --width 8 \
   --batch_size 16 \
