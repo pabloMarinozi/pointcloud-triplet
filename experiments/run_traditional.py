@@ -52,7 +52,7 @@ def build_run_name(cfg: dict) -> str:
     lr_str = f"{cfg['lr']:.0e}".replace("e-0", "e-").replace("e+0", "e+").replace(".0e", "e")
     mode = "lazy" if cfg.get("lazy") else "eager"
     sampling = cfg.get("sampling", "random")
-    return (
+    name = (
         f"np{cfg['n_points']}"
         f"_w{cfg['width']}"
         f"_ep{cfg['epochs']}"
@@ -62,6 +62,9 @@ def build_run_name(cfg: dict) -> str:
         f"_{sampling}"
         f"_{mode}"
     )
+    if cfg.get("save_sampled"):
+        name += "_ss"
+    return name
 
 
 def parse_args() -> argparse.Namespace:

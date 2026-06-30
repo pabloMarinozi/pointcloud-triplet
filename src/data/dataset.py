@@ -28,8 +28,7 @@ def sample_n(points: np.ndarray, n_points: int, sampling: str = "random") -> np.
 
     if n >= n_points and sampling == "fps_baya":
         from src.data.io import _fps_from_bayas
-        idx = np.random.permutation(n)
-        return _fps_from_bayas(points[idx], n_points)
+        return _fps_from_bayas(points, n_points)
 
     if sampling == "fps" and n >= n_points:
         idx = np.random.permutation(n)
