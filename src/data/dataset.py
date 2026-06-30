@@ -25,12 +25,18 @@ def normalize_unit_sphere(points: np.ndarray) -> np.ndarray:
 
 def sample_n(points: np.ndarray, n_points: int, sampling: str = "random") -> np.ndarray:
     n = len(points)
-    if sampling in ("fps", "fps_baya") and n >= n_points:
+
+    if n >= n_points and sampling == "fps_baya":
+        from src.data.io import _fps_from_bayas
+        idx = np.random.permutation(n)
+        return _fps_from_bayas(points[idx], n_points)
+
+    if sampling == "fps" and n >= n_points:
         idx = np.random.permutation(n)
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points[idx])
-        pcd = pcd.farthest_point_down_sample(n_points)
-        return np.asarray(pcd.points, dtype=np.float32)
+        return np.asarray(pcd.farthest_point_down_sample(n_points).points, dtype=np.float32)
+
     if n >= n_points:
         idx = np.random.choice(n, n_points, replace=False)
     else:

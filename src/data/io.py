@@ -43,10 +43,14 @@ def _fps_from_bayas(pts: np.ndarray, n_points: int, baya_size: int = BAYA_SIZE) 
         take = takes[i]
         if take <= 0:
             continue
-        baya = pts[i * baya_size : (i + 1) * baya_size]
+        start = i * baya_size
+        end = min((i + 1) * baya_size, n)
+        baya = pts[start:end]
+        if len(baya) == 0:
+            continue
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(baya)
-        if take < baya_size:
+        if take < len(baya):
             pcd = pcd.farthest_point_down_sample(take)
         collected.append(np.asarray(pcd.points, dtype=np.float32))
 
@@ -66,12 +70,15 @@ def sample_point_cloud(file_path: str, n_points: int, sampling: str = "random") 
     pcd = o3d.io.read_point_cloud(file_path)
 
     if sampling == "fps":
-        if len(pcd.points) >= n_points:
-            pts = np.asarray(pcd.points)
+        pts = np.asarray(pcd.points)
+        if len(pts) >= n_points:
             idx = np.random.permutation(len(pts))
             pcd.points = o3d.utility.Vector3dVector(pts[idx])
             pcd = pcd.farthest_point_down_sample(n_points)
-        return np.asarray(pcd.points, dtype=np.float32)
+            return np.asarray(pcd.points, dtype=np.float32)
+        else:
+            idx = np.random.choice(len(pts), n_points, replace=True)
+            return pts[idx].astype(np.float32)
 
     pts = np.asarray(pcd.points)
 

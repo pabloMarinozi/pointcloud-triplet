@@ -232,7 +232,7 @@ class TripletTrainingPipeline:
 
     def _save_sampled_clouds(self, all_point_clouds: list, timestamp: str) -> None:
         import open3d as o3d
-        from src.data.io import sample_point_cloud
+        from src.data.dataset import normalize_unit_sphere, sample_n
 
         sampled_dir = os.path.join("experiments", "sampling")
         os.makedirs(sampled_dir, exist_ok=True)
@@ -255,7 +255,13 @@ class TripletTrainingPipeline:
         for file_path in unique_paths:
             cloud_np = path_to_cloud.get(file_path)
             if cloud_np is None:
-                cloud_np = sample_point_cloud(file_path, self.n_points, self.sampling)
+                pcd = o3d.io.read_point_cloud(file_path)
+                full_pts = np.asarray(pcd.points, dtype=np.float32)
+                cloud_np = normalize_unit_sphere(full_pts)
+            else:
+                cloud_np = normalize_unit_sphere(np.asarray(cloud_np, dtype=np.float32))
+
+            cloud_np = sample_n(cloud_np, self.n_points, self.sampling)
 
             base_name = os.path.basename(file_path)
             out_name = f"{timestamp}+{base_name}"
