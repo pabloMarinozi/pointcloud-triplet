@@ -232,9 +232,9 @@ class TripletTrainingPipeline:
 
     def _save_sampled_clouds(self, all_point_clouds: list, timestamp: str) -> None:
         import open3d as o3d
-        from src.data.io import sample_point_cloud
+        from src.data.dataset import normalize_unit_sphere, sample_n
 
-        sampled_dir = os.path.join("experiments", "sampling")
+        sampled_dir = os.path.join("experiments", "sampling", timestamp)
         os.makedirs(sampled_dir, exist_ok=True)
 
         saved_count = 0
@@ -252,29 +252,71 @@ class TripletTrainingPipeline:
             if len(item) == 3 and item[1] not in path_to_cloud:
                 path_to_cloud[item[1]] = item[2]
 
+        is_baya = self.sampling == "fps_baya"
+
         for file_path in unique_paths:
             cloud_np = path_to_cloud.get(file_path)
             if cloud_np is None:
-                cloud_np = sample_point_cloud(file_path, self.n_points, self.sampling)
+                pcd = o3d.io.read_point_cloud(file_path)
+                full_pts = np.asarray(pcd.points, dtype=np.float32)
+                cloud_np = normalize_unit_sphere(full_pts)
+            else:
+                cloud_np = normalize_unit_sphere(np.asarray(cloud_np, dtype=np.float32))
 
             base_name = os.path.basename(file_path)
-            out_name = f"{timestamp}+{base_name}"
-            out_path = os.path.join(sampled_dir, out_name)
-            pcd_o3d = o3d.geometry.PointCloud()
-            pcd_o3d.points = o3d.utility.Vector3dVector(cloud_np)
-            o3d.io.write_point_cloud(out_path, pcd_o3d, write_ascii=True)
-            saved_count += 1
+            stem, _ = os.path.splitext(base_name)
 
+            if is_baya:
+                from src.data.io import _fps_from_bayas, _fps_from_bayas_split
+
+                merged = _fps_from_bayas(cloud_np, self.n_points)
+                out_name = f"{timestamp}+{stem}_merged.ply"
+                out_path = os.path.join(sampled_dir, out_name)
+                pcd_o3d = o3d.geometry.PointCloud()
+                pcd_o3d.points = o3d.utility.Vector3dVector(merged)
+                o3d.io.write_point_cloud(out_path, pcd_o3d, write_ascii=True)
+                saved_count += 1
+
+                bayas = _fps_from_bayas_split(cloud_np, self.n_points)
+                for i, baya in enumerate(bayas):
+                    out_name = f"{timestamp}+{stem}_baya{i:03d}.ply"
+                    out_path = os.path.join(sampled_dir, out_name)
+                    pcd_o3d = o3d.geometry.PointCloud()
+                    pcd_o3d.points = o3d.utility.Vector3dVector(baya)
+                    o3d.io.write_point_cloud(out_path, pcd_o3d, write_ascii=True)
+                    saved_count += 1
+            else:
+                cloud_np = sample_n(cloud_np, self.n_points, self.sampling)
+                out_name = f"{timestamp}+{base_name}"
+                out_path = os.path.join(sampled_dir, out_name)
+                pcd_o3d = o3d.geometry.PointCloud()
+                pcd_o3d.points = o3d.utility.Vector3dVector(cloud_np)
+                o3d.io.write_point_cloud(out_path, pcd_o3d, write_ascii=True)
+                saved_count += 1
+
+            progress_msg = f"  [PROGRESO]   ... {saved_count}/{total} nubes sampleadas"
+            if is_baya:
+                progress_msg += f" ({len(bayas) + 1} archivos por nube: 1 merged + {len(bayas)} bayas)"
             if saved_count % 500 == 0 or saved_count == total:
-                self._log(
-                    f"  [PROGRESO]   ... {saved_count}/{total} PLYs sampleados",
-                    console=True,
-                )
+                self._log(progress_msg, console=True)
 
-        self._log(
-            f"[SAMPLED] Saved {saved_count} sampled PLYs to {sampled_dir}/",
-            console=True,
-        )
+        final_msg = f"[SAMPLED] Saved {saved_count} sampled PLYs to {sampled_dir}/"
+        if is_baya:
+            final_msg += f" ({saved_count - len(unique_paths)} bayas + {len(unique_paths)} merged)"
+        self._log(final_msg, console=True)
+
+    def _start_monitor(self):
+        try:
+            from src.utils.monitor import SystemMonitor
+
+            csv_path = os.path.join(self.exp_dir, "system_metrics.csv")
+            monitor = SystemMonitor(csv_path, interval=5.0)
+            monitor.start()
+            self._log("System monitor started (psutil + nvml)", console=True)
+            return monitor
+        except Exception:
+            self._log("System monitor unavailable (psutil not installed)", console=False)
+            return None
 
     def _log(self, text: str, console: bool = False) -> None:
         elapsed = time.perf_counter() - self._t_init
@@ -385,6 +427,8 @@ class TripletTrainingPipeline:
                         console=True,
                     )
                     return
+
+        monitor = self._start_monitor()
 
         for epoch in range(start_epoch, self.epochs + 1):
             t_epoch_start = time.perf_counter()
@@ -555,6 +599,14 @@ class TripletTrainingPipeline:
                 break
 
         total_train_time = time.perf_counter() - self._t_train_start
+
+        if monitor is not None:
+            monitor.stop()
+            self._log(
+                f"System metrics saved to {os.path.join(self.exp_dir, 'system_metrics.csv')}",
+                console=True,
+            )
+
         self._log(f"Training finished. Best val_loss = {self.best_val:.6f}  total_time={total_train_time:.1f}s", console=True)
 
         # Marcar hasta qué época se entrenó (para carpetas de evaluación ep<N>)

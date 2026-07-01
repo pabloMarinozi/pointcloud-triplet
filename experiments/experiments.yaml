@@ -59,6 +59,4 @@ runs:
     lazy: true
     sampling: fps
 
-mlflow:
-  tracking_uri: "sqlite:///mlruns/mlflow.db"
-  log_system_metrics: true
+
