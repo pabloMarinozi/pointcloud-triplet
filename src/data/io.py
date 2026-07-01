@@ -48,6 +48,7 @@ def _fps_from_bayas(pts: np.ndarray, n_points: int, baya_size: int = BAYA_SIZE) 
         baya = pts[start:end]
         if len(baya) == 0:
             continue
+        baya = baya[np.random.permutation(len(baya))]
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(baya)
         if take < len(baya):
@@ -86,6 +87,7 @@ def _fps_from_bayas_split(pts: np.ndarray, n_points: int, baya_size: int = BAYA_
         baya = pts[start:end]
         if len(baya) == 0:
             continue
+        baya = baya[np.random.permutation(len(baya))]
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(baya)
         if take < len(baya):
@@ -101,14 +103,25 @@ def sample_point_cloud(file_path: str, n_points: int, sampling: str = "random") 
     sampling: "random" | "fps" | "fps_baya"
     Retorna (n_points, 3) float32.
 
-    Para fps y fps_baya devuelve la nube completa; el sampleo real se hace
-    aguas abajo sobre coordenadas normalizadas (igual que en lazy mode).
+    fps       → FPS sobre coordenadas crudas con permutacion global.
+    fps_baya  → devuelve la nube completa; el sampleo real se hace aguas abajo
+                sobre coordenadas normalizadas via _fps_from_bayas.
+    random    → eleccion aleatoria.
     """
     pcd = o3d.io.read_point_cloud(file_path)
     pts = np.asarray(pcd.points, dtype=np.float32)
 
-    if sampling == "fps" or sampling == "fps_baya":
+    if sampling == "fps_baya":
         return pts
+
+    if sampling == "fps":
+        if len(pts) >= n_points:
+            idx = np.random.permutation(len(pts))
+            pcd.points = o3d.utility.Vector3dVector(pts[idx])
+            pcd = pcd.farthest_point_down_sample(n_points)
+            return np.asarray(pcd.points, dtype=np.float32)
+        idx = np.random.choice(len(pts), n_points, replace=True)
+        return pts[idx].astype(np.float32)
 
     if pts.shape[0] >= n_points:
         idx = np.random.choice(len(pts), n_points, replace=False)
