@@ -49,6 +49,9 @@ def merge_config(defaults: dict, run_cfg: dict) -> dict:
 
 def build_run_name(cfg: dict) -> str:
     """Genera un nombre de run determinístico concatenando todos los hiperparámetros."""
+    if cfg.get("run_name"):
+        return str(cfg["run_name"])
+
     lr_str = f"{cfg['lr']:.0e}".replace("e-0", "e-").replace("e+0", "e+").replace(".0e", "e")
     mode = "lazy" if cfg.get("lazy") else "eager"
     sampling = cfg.get("sampling", "random")
