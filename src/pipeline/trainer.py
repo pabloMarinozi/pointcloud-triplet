@@ -4,6 +4,7 @@ import csv
 import json
 import math
 import os
+import shutil
 import time
 from datetime import datetime
 from typing import Dict, List, Tuple
@@ -345,6 +346,18 @@ class TripletTrainingPipeline:
         torch.save(checkpoint, self.checkpoint_last_path)
         self._log(f"[CHECKPOINT] Saved checkpoint at epoch {epoch}", console=False)
 
+    def _save_epoch_snapshot(self, epoch: int) -> None:
+        """Guarda una copia recuperable del mejor modelo en ep<N>/model.pt."""
+        ep_dir = os.path.join(self.exp_dir, f"ep{epoch}")
+        os.makedirs(ep_dir, exist_ok=True)
+
+        snapshot_path = os.path.join(ep_dir, "model.pt")
+        if os.path.exists(self.best_model_path):
+            shutil.copy2(self.best_model_path, snapshot_path)
+        else:
+            torch.save(self.model.state_dict(), snapshot_path)
+        self._log(f"[SNAPSHOT] Saved model snapshot to {snapshot_path}", console=True)
+
     def _load_checkpoint(self) -> int | None:
         """
         Carga el checkpoint más reciente si existe.
@@ -582,6 +595,8 @@ class TripletTrainingPipeline:
                     self.epochs_without_improvement += 1
 
                 self._save_checkpoint(epoch, train_loss, val_loss, lr)
+                if epoch % 100 == 0:
+                    self._save_epoch_snapshot(epoch)
 
                 if (
                     self.early_stopping_patience is not None
@@ -613,6 +628,7 @@ class TripletTrainingPipeline:
         last_epoch_path = os.path.join(self.exp_dir, "last_epoch.json")
         with open(last_epoch_path, "w", encoding="utf-8") as f:
             json.dump({"epoch": epoch}, f, indent=2)
+        self._save_epoch_snapshot(epoch)
 
         return self.model
 
