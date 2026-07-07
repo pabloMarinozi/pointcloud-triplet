@@ -84,7 +84,10 @@ class TripletPointCloudDataset(Dataset):
         self.class_to_indices: Dict[str, List[int]] = {}
 
         for idx, (folder, _, cloud) in enumerate(all_point_clouds):
-            pts = normalize_unit_sphere(to_numpy(cloud)).astype(np.float32)
+            if sampling == "fps_baya":
+                pts = to_numpy(cloud).astype(np.float32)
+            else:
+                pts = normalize_unit_sphere(to_numpy(cloud)).astype(np.float32)
             self.items.append((folder, pts))
             self.class_to_indices.setdefault(folder, []).append(idx)
 

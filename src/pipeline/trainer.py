@@ -257,7 +257,7 @@ class TripletTrainingPipeline:
 
         for file_path in unique_paths:
             cloud_np = path_to_cloud.get(file_path)
-            if cloud_np is None:
+            if cloud_np is None or is_baya:
                 pcd = o3d.io.read_point_cloud(file_path)
                 full_pts = np.asarray(pcd.points, dtype=np.float32)
                 cloud_np = normalize_unit_sphere(full_pts)

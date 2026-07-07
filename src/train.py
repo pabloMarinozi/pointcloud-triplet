@@ -9,7 +9,8 @@ from typing import List, Tuple
 import numpy as np
 import torch
 
-from src.data.io import find_ply_files, sample_point_cloud
+from src.data.dataset import normalize_unit_sphere
+from src.data.io import _fps_from_bayas, find_ply_files, sample_point_cloud
 from src.models.triplet import TripletNet
 from src.pipeline.trainer import LazyTripletTrainingPipeline, TripletTrainingPipeline
 from src.utils.seed import set_seed
@@ -19,6 +20,8 @@ PROGRESS_EVERY_N_FILES = 5000
 
 
 def build_all_point_clouds(ply_dir: str, n_points: int, sampling: str = "random"):
+    import open3d as o3d
+
     t0 = time.perf_counter()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Buscando archivos .ply (recursivo)...", flush=True)
     files = find_ply_files(ply_dir)
@@ -30,7 +33,12 @@ def build_all_point_clouds(ply_dir: str, n_points: int, sampling: str = "random"
     all_point_clouds = []
     for i, file_path in enumerate(files):
         folder = os.path.basename(os.path.dirname(file_path))
-        cloud = sample_point_cloud(file_path, n_points, sampling)
+        if sampling == "fps_baya":
+            pcd = o3d.io.read_point_cloud(file_path)
+            pts = np.asarray(pcd.points, dtype=np.float32)
+            cloud = _fps_from_bayas(normalize_unit_sphere(pts), n_points)
+        else:
+            cloud = sample_point_cloud(file_path, n_points, sampling)
         all_point_clouds.append((folder, file_path, cloud))
         if (i + 1) % PROGRESS_EVERY_N_FILES == 0:
             elapsed = time.perf_counter() - t0

@@ -104,8 +104,9 @@ def sample_point_cloud(file_path: str, n_points: int, sampling: str = "random") 
     Retorna (n_points, 3) float32.
 
     fps       → FPS sobre coordenadas crudas con permutacion global.
-    fps_baya  → devuelve la nube completa; el sampleo real se hace aguas abajo
-                sobre coordenadas normalizadas via _fps_from_bayas.
+    fps_baya  → devuelve la nube completa para rutas que difieren el sampleo
+                (lazy). En eager, train.py normaliza y aplica _fps_from_bayas
+                antes de guardar la nube en RAM.
     random    → eleccion aleatoria.
     """
     pcd = o3d.io.read_point_cloud(file_path)
