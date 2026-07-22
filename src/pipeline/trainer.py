@@ -17,10 +17,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
 from src.data.dataset import TripletPointCloudDataset, normalize_unit_sphere, to_numpy, augment, sample_n
+from src.data.splits import split_known_and_unknown
 from src.models.triplet import triplet_loss_squared
 
 
@@ -58,6 +58,8 @@ class TripletTrainingPipeline:
         early_stopping_patience: int | None = None,
         sampling: str = "random",
         save_sampled: bool = False,
+        open_set_classes: int = 0,
+        open_set_val_size: float = 0.5,
     ):
         self._t_init = time.perf_counter()
         self.start_time = datetime.now()
@@ -81,6 +83,9 @@ class TripletTrainingPipeline:
         self.train_split_path = os.path.join(self.splits_dir, "train_paths.json")
         self.val_split_path = os.path.join(self.splits_dir, "val_paths.json")
         self.test_split_path = os.path.join(self.splits_dir, "test_paths.json")
+        self.open_set_val_split_path = os.path.join(self.splits_dir, "open_set_val_paths.json")
+        self.open_set_test_split_path = os.path.join(self.splits_dir, "open_set_test_paths.json")
+        self.open_set_classes_path = os.path.join(self.splits_dir, "open_set_classes.json")
 
         self.n_points = n_points
         self.sampling = sampling
@@ -102,6 +107,8 @@ class TripletTrainingPipeline:
             "early_stopping_patience": early_stopping_patience,
             "sampling": sampling,
             "save_sampled": save_sampled,
+            "open_set_classes": open_set_classes,
+            "open_set_val_size": open_set_val_size,
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -118,23 +125,28 @@ class TripletTrainingPipeline:
         # DATASET SPLIT 70/15/15 (train/val/test, estratificado por carpeta)
         # -----------------------------
         t0 = time.perf_counter()
-        folders = sorted(list(set(f for f, _, _ in all_point_clouds)))
-
-        train_clouds, val_clouds, test_clouds = [], [], []
-        for folder in folders:
-            class_clouds = [x for x in all_point_clouds if x[0] == folder]
-            # Primero separar test (15%)
-            train_val, test = train_test_split(class_clouds, test_size=test_size, random_state=seed)
-            # Del resto (85%), separar val (15% del total = val_size/(1-test_size) del train_val)
-            val_ratio = val_size / (1.0 - test_size)
-            tr, va = train_test_split(train_val, test_size=val_ratio, random_state=seed)
-            train_clouds.extend(tr)
-            val_clouds.extend(va)
-            test_clouds.extend(test)
+        (
+            train_clouds,
+            val_clouds,
+            test_clouds,
+            unknown_val_clouds,
+            unknown_test_clouds,
+            known_classes,
+            unknown_classes,
+        ) = split_known_and_unknown(
+            all_point_clouds,
+            val_size=val_size,
+            test_size=test_size,
+            open_set_classes=open_set_classes,
+            open_set_val_size=open_set_val_size,
+            seed=seed,
+        )
 
         self.train_clouds = train_clouds
         self.val_clouds = val_clouds
         self.test_clouds = test_clouds
+        self.unknown_val_clouds = unknown_val_clouds
+        self.unknown_test_clouds = unknown_test_clouds
         self._log(
             f"  [PROGRESO] Split train/val/test: {len(train_clouds)} / {len(val_clouds)} / {len(test_clouds)} ({(time.perf_counter() - t0):.1f}s)",
             console=True,
@@ -143,6 +155,8 @@ class TripletTrainingPipeline:
         train_paths = [p for _, p, _ in self.train_clouds]
         val_paths = [p for _, p, _ in self.val_clouds]
         test_paths = [p for _, p, _ in self.test_clouds]
+        unknown_val_paths = [p for _, p, _ in self.unknown_val_clouds]
+        unknown_test_paths = [p for _, p, _ in self.unknown_test_clouds]
 
         # Solo guardar splits si no existen (para mantener consistencia al reanudar)
         if not os.path.exists(self.train_split_path):
@@ -166,10 +180,38 @@ class TripletTrainingPipeline:
         else:
             self._log(f"Test split already exists, keeping existing: {self.test_split_path}", console=True)
 
+        if open_set_classes:
+            split_artifacts = (
+                (self.open_set_val_split_path, unknown_val_paths),
+                (self.open_set_test_split_path, unknown_test_paths),
+                (
+                    self.open_set_classes_path,
+                    {
+                        "known": known_classes,
+                        "unknown": unknown_classes,
+                        "unknown_calibration": sorted({x[0] for x in unknown_val_clouds}),
+                        "unknown_test": sorted({x[0] for x in unknown_test_clouds}),
+                    },
+                ),
+            )
+            for path, data in split_artifacts:
+                if not os.path.exists(path):
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=4)
+                    self._log(f"Saved open-set split to {path}", console=True)
+                else:
+                    self._log(f"Open-set split already exists, keeping existing: {path}", console=True)
+
         self._log(f"Train clouds: {len(train_clouds)}", console=True)
         self._log(f"Val clouds:   {len(val_clouds)}", console=True)
         self._log(f"Test clouds:  {len(test_clouds)}", console=True)
-        self._log(f"Classes:      {len(folders)}", console=True)
+        self._log(f"Known classes: {len(known_classes)}", console=True)
+        if open_set_classes:
+            self._log(
+                f"Unknown calibration/test: {len(unknown_val_clouds)} / {len(unknown_test_clouds)} "
+                f"samples from {len(unknown_classes)} classes",
+                console=True,
+            )
 
         # -----------------------------
         # DATASETS Y DATALOADERS
@@ -639,6 +681,8 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
         early_stopping_patience: int | None = None,
         sampling: str = "random",
         save_sampled: bool = False,
+        open_set_classes: int = 0,
+        open_set_val_size: float = 0.5,
     ):
         from src.data.dataset import LazyTripletPointCloudDataset
 
@@ -664,6 +708,9 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
         self.train_split_path = os.path.join(self.splits_dir, "train_paths.json")
         self.val_split_path = os.path.join(self.splits_dir, "val_paths.json")
         self.test_split_path = os.path.join(self.splits_dir, "test_paths.json")
+        self.open_set_val_split_path = os.path.join(self.splits_dir, "open_set_val_paths.json")
+        self.open_set_test_split_path = os.path.join(self.splits_dir, "open_set_test_paths.json")
+        self.open_set_classes_path = os.path.join(self.splits_dir, "open_set_classes.json")
 
         self.n_points = n_points
         self.sampling = sampling
@@ -686,6 +733,8 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
             "sampling": sampling,
             "lazy": True,
             "save_sampled": save_sampled,
+            "open_set_classes": open_set_classes,
+            "open_set_val_size": open_set_val_size,
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -699,21 +748,28 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
             self._save_sampled_clouds(all_point_clouds, timestamp)
 
         t0 = time.perf_counter()
-        folders = sorted(list(set(f for f, _ in all_point_clouds)))
-
-        train_clouds, val_clouds, test_clouds = [], [], []
-        for folder in folders:
-            class_clouds = [x for x in all_point_clouds if x[0] == folder]
-            train_val, test = train_test_split(class_clouds, test_size=test_size, random_state=seed)
-            val_ratio = val_size / (1.0 - test_size)
-            tr, va = train_test_split(train_val, test_size=val_ratio, random_state=seed)
-            train_clouds.extend(tr)
-            val_clouds.extend(va)
-            test_clouds.extend(test)
+        (
+            train_clouds,
+            val_clouds,
+            test_clouds,
+            unknown_val_clouds,
+            unknown_test_clouds,
+            known_classes,
+            unknown_classes,
+        ) = split_known_and_unknown(
+            all_point_clouds,
+            val_size=val_size,
+            test_size=test_size,
+            open_set_classes=open_set_classes,
+            open_set_val_size=open_set_val_size,
+            seed=seed,
+        )
 
         self.train_clouds = train_clouds
         self.val_clouds = val_clouds
         self.test_clouds = test_clouds
+        self.unknown_val_clouds = unknown_val_clouds
+        self.unknown_test_clouds = unknown_test_clouds
         self._log(
             f"  [PROGRESO] Split train/val/test: {len(train_clouds)} / {len(val_clouds)} / {len(test_clouds)} ({(time.perf_counter() - t0):.1f}s)",
             console=True,
@@ -722,6 +778,8 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
         train_paths = [p for _, p in self.train_clouds]
         val_paths = [p for _, p in self.val_clouds]
         test_paths = [p for _, p in self.test_clouds]
+        unknown_val_paths = [p for _, p in self.unknown_val_clouds]
+        unknown_test_paths = [p for _, p in self.unknown_test_clouds]
 
         if not os.path.exists(self.train_split_path):
             with open(self.train_split_path, "w", encoding="utf-8") as f:
@@ -744,10 +802,38 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
         else:
             self._log(f"Test split already exists, keeping existing: {self.test_split_path}", console=True)
 
+        if open_set_classes:
+            split_artifacts = (
+                (self.open_set_val_split_path, unknown_val_paths),
+                (self.open_set_test_split_path, unknown_test_paths),
+                (
+                    self.open_set_classes_path,
+                    {
+                        "known": known_classes,
+                        "unknown": unknown_classes,
+                        "unknown_calibration": sorted({x[0] for x in unknown_val_clouds}),
+                        "unknown_test": sorted({x[0] for x in unknown_test_clouds}),
+                    },
+                ),
+            )
+            for path, data in split_artifacts:
+                if not os.path.exists(path):
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=4)
+                    self._log(f"Saved open-set split to {path}", console=True)
+                else:
+                    self._log(f"Open-set split already exists, keeping existing: {path}", console=True)
+
         self._log(f"Train clouds: {len(train_clouds)}", console=True)
         self._log(f"Val clouds:   {len(val_clouds)}", console=True)
         self._log(f"Test clouds:  {len(test_clouds)}", console=True)
-        self._log(f"Classes:      {len(folders)}", console=True)
+        self._log(f"Known classes: {len(known_classes)}", console=True)
+        if open_set_classes:
+            self._log(
+                f"Unknown calibration/test: {len(unknown_val_clouds)} / {len(unknown_test_clouds)} "
+                f"samples from {len(unknown_classes)} classes",
+                console=True,
+            )
 
         t0 = time.perf_counter()
         self.train_ds = LazyTripletPointCloudDataset(self.train_clouds, n_points=n_points, train=True, sampling=sampling)

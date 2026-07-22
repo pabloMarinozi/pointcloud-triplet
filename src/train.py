@@ -68,6 +68,18 @@ def parse_args():
     p.add_argument("--clip_norm", type=float, default=1.0)
     p.add_argument("--val_size", type=float, default=0.15, help="Val ratio (train/val/test = 70/15/15 por defecto).")
     p.add_argument("--test_size", type=float, default=0.15, help="Test ratio.")
+    p.add_argument(
+        "--open_set_classes",
+        type=int,
+        default=0,
+        help="Identidades completas reservadas como desconocidas (0 desactiva open-set).",
+    )
+    p.add_argument(
+        "--open_set_val_size",
+        type=float,
+        default=0.5,
+        help="Fracción de identidades desconocidas usada para calibrar el umbral.",
+    )
     p.add_argument("--sampling", type=str, choices=["random", "fps", "fps_baya"], default="random", help="Estrategia de muestreo de puntos.")
     p.add_argument(
         "--early_stopping_patience",
@@ -129,6 +141,8 @@ def main():
         early_stopping_patience=args.early_stopping_patience,
         sampling=args.sampling,
         save_sampled=args.save_sampled,
+        open_set_classes=args.open_set_classes,
+        open_set_val_size=args.open_set_val_size,
     )
     pipe_init_s = time.perf_counter() - t_pipe
     ts_print(f"Pipeline listo en {pipe_init_s:.1f}s")
