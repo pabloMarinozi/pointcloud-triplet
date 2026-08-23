@@ -15,9 +15,10 @@
 
 ## Comparación
 
-La tabla comparativa está en la sección 3.3 de `docs/RESULTADOS.md`. Sus valores
-quedan pendientes hasta ejecutar el comando documentado allí; la implementación
-no corrió evaluación sobre el dataset ni checkpoints.
+La tabla completa está en la sección 3.3 de `docs/RESULTADOS.md`. PCA whitening
+fue la mejor variante: pasó de 0.6210 a 0.6980 de accuracy en val y de 0.6122 a
+0.6885 en test. K-recíproco, RRF y el stack no mejoraron el baseline; las
+hipótesis y próximos experimentos están documentados junto a la tabla.
 
 ## Hiperparámetros y selección
 
@@ -58,5 +59,6 @@ python -m src.eval \
   --run w8_np512_m0.5_lr3e-4_bs16_seed42_fps \
   --split both \
   --seed 42 \
+  --embedding_batch_size 512 \
   --postprocess
 ```

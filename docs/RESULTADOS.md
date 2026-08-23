@@ -102,20 +102,46 @@ los 5 runs restantes). Reportes en `runs/<run>/ep200/evaluation_report.json`.
 
 ### 3.3 Post-procesamiento de embeddings (ep3000)
 
-La comparación debe ejecutarse sobre
+La comparación se ejecutó sobre
 `w8_np512_m0.5_lr3e-4_bs16_seed42_fps` a ep3000 con seed 42. Los
-hiperparámetros se seleccionan usando solamente val y se aplican sin cambios a
-test. La ejecución quedó pendiente para respetar la restricción de no correr la
-evaluación durante la implementación; no se completan valores a partir de
-estimaciones.
+hiperparámetros se seleccionaron usando solamente val y se aplicaron sin cambios
+a test.
 
 | Variante seleccionada en val | Val acc | Val top5 | Val top10 | Val MRR | Test acc | Test top5 | Test top10 | Test MRR |
 |-------------------------------|---------|----------|-----------|---------|----------|-----------|------------|----------|
-| Baseline | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
-| + PCA whitening | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
-| + k-recíproco | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
-| + rank fusion (RRF) | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
-| Whitening + k-recíproco + RRF | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
+| Baseline | 62.10% | 97.46% | 99.90% | 0.7707 | 61.22% | 97.52% | 99.81% | 0.7645 |
+| + PCA whitening | **69.80%** | **98.44%** | 99.85% | **0.8207** | **68.85%** | **98.10%** | 99.71% | **0.8144** |
+| + k-recíproco | 52.66% | 90.84% | 97.13% | 0.6896 | 51.95% | 90.49% | 97.18% | 0.6828 |
+| + rank fusion (RRF) | 57.25% | 94.02% | 98.19% | 0.7271 | 56.92% | 93.80% | 98.23% | 0.7231 |
+| Whitening + k-recíproco + RRF | 59.22% | 93.21% | 97.73% | 0.7364 | 58.94% | 92.83% | 97.52% | 0.7335 |
+
+Whitening fue la única mejora efectiva: sumó **+7.70 puntos absolutos en val** y
+**+7.63 en test** sobre el baseline seleccionado, superando la meta de +5 puntos.
+La configuración ganadora fue `multiprototype_k5 / L1 Distance`, conservando
+todas las componentes PCA y usando shrinkage `1e-4`.
+
+Las demás selecciones de val fueron:
+
+- k-recíproco: `trimmed_mean_10 / L1`, `k1=10`, `k2=3`, `lambda=0.5`;
+- RRF: `L1`, constante 20, fusionando las nueve estrategias disponibles;
+- stack: Cosine, con los hiperparámetros anteriores y whitening `all/1e-4`.
+
+El deterioro de k-recíproco probablemente se debe a que la galería tiene sólo
+100 identidades y el grafo opera a nivel de clase, un régimen mucho más chico y
+menos redundante que las galerías de person re-id para las que fue diseñado. RRF
+pondera por igual estrategias fuertes y débiles, por lo que diluye la señal de
+`multiprototype_k5`; el stack hereda ambos deterioros y no logra conservar la
+ganancia de whitening. Próximas pruebas razonables son fusionar sólo las mejores
+estrategias de val, usar RRF ponderado y re-rankear prototipos individuales antes
+de colapsar por clase.
+
+Hay una inconsistencia con `docs/README_HANDOFF.md`: allí se esperaba
+`centroid_all/L1` y aproximadamente 0.50 de accuracy. La corrida reproducible con
+los cachés/manifiestos entregados seleccionó `multiprototype_k5/Cosine` y obtuvo
+0.6210 val / 0.6122 test. El directorio `ep3000` contiene nueve estrategias, no
+los seis archivos indicados en el handoff, y el reporte preexistente ya señalaba
+`multiprototype_k5` como ganador; por lo tanto el handoff parece describir una
+versión anterior de los artefactos.
 
 Los algoritmos implementados son:
 
@@ -146,6 +172,7 @@ python -m src.eval \
   --run w8_np512_m0.5_lr3e-4_bs16_seed42_fps \
   --split both \
   --seed 42 \
+  --embedding_batch_size 512 \
   --postprocess
 ```
 
