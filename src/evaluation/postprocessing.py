@@ -143,16 +143,6 @@ def _score_references(a: np.ndarray, b: np.ndarray, method: Method) -> float:
     return float(scores.max() if method.maximize else scores.min())
 
 
-def _scores_to_distances(scores: np.ndarray, maximize: bool) -> np.ndarray:
-    values = np.asarray(scores, dtype=np.float64)
-    distances = values.max() - values if maximize else values - values.min()
-    distances = np.maximum(distances, 0.0)
-    np.fill_diagonal(distances, 0.0)
-    scale = distances.max(axis=0, keepdims=True)
-    scale = np.where(scale > 1e-12, scale, 1.0)
-    return (distances / scale).T.astype(np.float32)
-
-
 def k_reciprocal_rerank(
     distances: np.ndarray,
     query_count: int,
@@ -230,32 +220,201 @@ def rank_samples_k_reciprocal(
     config: KReciprocalConfig,
 ) -> List[Ranking]:
     """Reordena clases por query usando la vecindad recíproca entre referencias."""
-    labels = list(references)
-    reference_scores = np.empty((len(labels), len(labels)), dtype=np.float64)
-    for left_index, left_label in enumerate(labels):
-        for right_index in range(left_index, len(labels)):
-            score = _score_references(
-                references[left_label], references[labels[right_index]], method
-            )
-            reference_scores[left_index, right_index] = score
-            reference_scores[right_index, left_index] = score
+    return KReciprocalRanker(samples, references, method).rank(config)
 
-    rankings = []
-    for _true_label, _path, embedding in samples:
-        query_scores = np.asarray(
-            [_score_class(embedding, references[label], method) for label in labels]
+
+class KReciprocalRanker:
+    """Precalcula scores y aplica distintas configuraciones sin repetirlos."""
+
+    def __init__(
+        self,
+        samples: Sequence[EmbeddingSample],
+        references: References,
+        method: Method,
+    ):
+        self.labels = list(references)
+        self.query_count = len(samples)
+        self.gallery_count = len(self.labels)
+        if self.gallery_count < 2:
+            raise ValueError("k-recíproco requiere al menos dos clases")
+
+        reference_scores = np.empty(
+            (self.gallery_count, self.gallery_count), dtype=np.float64
         )
-        self_score = method.func(embedding, embedding)
-        scores = np.empty((len(labels) + 1, len(labels) + 1), dtype=np.float64)
-        scores[0, 0] = self_score
-        scores[0, 1:] = query_scores
-        scores[1:, 0] = query_scores
-        scores[1:, 1:] = reference_scores
-        distances = _scores_to_distances(scores, method.maximize)
-        reranked = k_reciprocal_rerank(distances, 1, config)[0]
-        order = np.argsort(reranked, kind="stable")
-        rankings.append([labels[index] for index in order])
-    return rankings
+        for left_index, left_label in enumerate(self.labels):
+            for right_index in range(left_index, self.gallery_count):
+                score = _score_references(
+                    references[left_label],
+                    references[self.labels[right_index]],
+                    method,
+                )
+                reference_scores[left_index, right_index] = score
+                reference_scores[right_index, left_index] = score
+
+        query_scores = np.asarray(
+            [
+                [
+                    _score_class(embedding, references[label], method)
+                    for label in self.labels
+                ]
+                for _true_label, _path, embedding in samples
+            ],
+            dtype=np.float64,
+        )
+        if method.maximize:
+            origin = max(reference_scores.max(), query_scores.max())
+            gallery_raw = origin - reference_scores
+            query_raw = origin - query_scores
+        else:
+            origin = min(reference_scores.min(), query_scores.min())
+            gallery_raw = reference_scores - origin
+            query_raw = query_scores - origin
+        gallery_raw = np.maximum(gallery_raw, 0.0)
+        query_raw = np.maximum(query_raw, 0.0)
+        np.fill_diagonal(gallery_raw, 0.0)
+
+        gallery_scale = np.maximum(
+            gallery_raw.max(axis=1), query_raw.max(axis=0)
+        )
+        gallery_scale = np.where(gallery_scale > 1e-12, gallery_scale, 1.0)
+        query_scale = query_raw.max(axis=1, keepdims=True)
+        query_scale = np.where(query_scale > 1e-12, query_scale, 1.0)
+        self.gallery_raw = gallery_raw.astype(np.float32)
+        self.query_raw = query_raw.astype(np.float32)
+        self.gallery_distances = (
+            gallery_raw / gallery_scale[:, None]
+        ).astype(np.float32)
+        self.query_distances = (query_raw / query_scale).astype(np.float32)
+        self.gallery_order = np.argsort(
+            self.gallery_distances, axis=1, kind="stable"
+        )
+        self.query_order = np.argsort(
+            self.query_distances, axis=1, kind="stable"
+        )
+        self._gallery_weight_cache: Dict[
+            Tuple[int, int], Tuple[np.ndarray, List[np.ndarray]]
+        ] = {}
+
+    def _gallery_weights(
+        self, k1: int, k2: int
+    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+        cache_key = (k1, k2)
+        if cache_key in self._gallery_weight_cache:
+            return self._gallery_weight_cache[cache_key]
+
+        k1 = min(k1, self.gallery_count - 1)
+        reciprocal_sets = []
+        weights = np.zeros_like(self.gallery_distances)
+        for index in range(self.gallery_count):
+            forward = self.gallery_order[index, : k1 + 1]
+            backward = self.gallery_order[forward, : k1 + 1]
+            reciprocal = forward[np.any(backward == index, axis=1)]
+            reciprocal_sets.append(reciprocal)
+
+        half_k = max(1, int(round(k1 / 2)))
+        half_reciprocal_sets = []
+        for index in range(self.gallery_count):
+            forward = self.gallery_order[index, : half_k + 1]
+            backward = self.gallery_order[forward, : half_k + 1]
+            half_reciprocal_sets.append(
+                forward[np.any(backward == index, axis=1)]
+            )
+        expanded_sets = []
+        for index, reciprocal in enumerate(reciprocal_sets):
+            expanded = reciprocal.copy()
+            for candidate in reciprocal:
+                candidate_set = half_reciprocal_sets[candidate]
+                if not len(candidate_set):
+                    continue
+                overlap = np.intersect1d(candidate_set, reciprocal)
+                if len(overlap) > (2.0 / 3.0) * len(candidate_set):
+                    expanded = np.append(expanded, candidate_set)
+            expanded = np.unique(expanded)
+            expanded_sets.append(expanded)
+            affinity = np.exp(-self.gallery_distances[index, expanded])
+            weights[index, expanded] = affinity / max(float(affinity.sum()), 1e-12)
+
+        k2 = min(k2, self.gallery_count)
+        if k2 > 1:
+            weights = np.asarray(
+                [
+                    weights[self.gallery_order[index, :k2]].mean(axis=0)
+                    for index in range(self.gallery_count)
+                ],
+                dtype=np.float32,
+            )
+        result = weights, expanded_sets
+        self._gallery_weight_cache[cache_key] = result
+        return result
+
+    def rank(self, config: KReciprocalConfig) -> List[Ranking]:
+        if config.k1 < 1 or config.k2 < 1:
+            raise ValueError("k1 y k2 deben ser positivos")
+        if not 0.0 <= config.lambda_value <= 1.0:
+            raise ValueError("lambda debe estar entre 0 y 1")
+        k1 = min(config.k1, self.gallery_count - 1)
+        gallery_weights, gallery_expanded_sets = self._gallery_weights(
+            k1, config.k2
+        )
+        query_weights = np.zeros_like(self.query_distances)
+        gallery_threshold = np.partition(
+            self.gallery_raw, kth=k1, axis=1
+        )[:, k1]
+
+        for query_index in range(self.query_count):
+            forward = self.query_order[query_index, :k1]
+            reciprocal = forward[
+                self.query_raw[query_index, forward]
+                <= gallery_threshold[forward]
+            ]
+            if not len(reciprocal):
+                reciprocal = forward[:1]
+            expanded = reciprocal.copy()
+            for candidate in reciprocal:
+                candidate_set = gallery_expanded_sets[candidate]
+                if not len(candidate_set):
+                    continue
+                overlap = np.intersect1d(candidate_set, reciprocal)
+                if len(overlap) > (2.0 / 3.0) * len(candidate_set):
+                    expanded = np.append(expanded, candidate_set)
+            expanded = np.unique(expanded)
+            affinity = np.exp(-self.query_distances[query_index, expanded])
+            query_weights[query_index, expanded] = affinity / max(
+                float(affinity.sum()), 1e-12
+            )
+
+        k2 = min(config.k2, self.gallery_count + 1)
+        if k2 > 1:
+            neighbor_count = k2 - 1
+            expanded_query_weights = np.empty_like(query_weights)
+            for query_index in range(self.query_count):
+                neighbors = self.query_order[query_index, :neighbor_count]
+                expanded_query_weights[query_index] = (
+                    query_weights[query_index] + gallery_weights[neighbors].sum(axis=0)
+                ) / (len(neighbors) + 1)
+            query_weights = expanded_query_weights
+
+        reranked_distances = np.empty_like(self.query_distances)
+        chunk_size = 256
+        for start in range(0, self.query_count, chunk_size):
+            stop = min(start + chunk_size, self.query_count)
+            intersection = np.minimum(
+                query_weights[start:stop, None, :],
+                gallery_weights[None, :, :],
+            ).sum(axis=2)
+            jaccard = 1.0 - intersection / np.maximum(
+                2.0 - intersection, 1e-12
+            )
+            reranked_distances[start:stop] = (
+                (1.0 - config.lambda_value) * jaccard
+                + config.lambda_value * self.query_distances[start:stop]
+            )
+
+        orders = np.argsort(reranked_distances, axis=1, kind="stable")
+        return [
+            [self.labels[index] for index in order]
+            for order in orders
+        ]
 
 
 def reciprocal_rank_fusion(
@@ -462,12 +621,11 @@ def evaluate_postprocessing(
                 )
 
     emit("Post-procesamiento: grilla k-recíproca")
-    for reranking_config in reranking_configs:
-        for strategy, references in references_by_strategy.items():
-            for method_name, method in methods.items():
-                rankings = rank_samples_k_reciprocal(
-                    val_samples, references, method, reranking_config
-                )
+    for strategy, references in references_by_strategy.items():
+        for method_name, method in methods.items():
+            ranker = KReciprocalRanker(val_samples, references, method)
+            for reranking_config in reranking_configs:
+                rankings = ranker.rank(reranking_config)
                 candidates["k_reciprocal"].append(
                     _candidate(
                         metrics_from_rankings(val_samples, rankings),
@@ -517,15 +675,12 @@ def evaluate_postprocessing(
 
     emit("Post-procesamiento: whitening + k-recíproco + fusión")
     for method_name, method in methods.items():
-        source_rankings = {
-            strategy: rank_samples_k_reciprocal(
-                whitened_val,
-                whitened_references[strategy],
-                method,
-                selected_reranking,
+        source_rankings = {}
+        for strategy in strategy_names:
+            ranker = KReciprocalRanker(
+                whitened_val, whitened_references[strategy], method
             )
-            for strategy in strategy_names
-        }
+            source_rankings[strategy] = ranker.rank(selected_reranking)
         rankings = reciprocal_rank_fusion(
             source_rankings, int(selected_rrf["constant"])
         )
