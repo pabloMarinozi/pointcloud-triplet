@@ -22,6 +22,7 @@ from src.evaluation.loader import (
     get_model_version,
 )
 from src.evaluation.metrics import default_methods
+from src.evaluation.open_set import evaluate_open_set
 from src.evaluation.report import evaluate_run_on_val, summarize_errors_by_class
 from src.evaluation.ref_strategies import ensure_all_strategies_saved
 from src.evaluation.video_index import load_video_index
@@ -50,6 +51,11 @@ def parse_args():
     )
     p.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad.")
     p.add_argument("--export_csv", action="store_true", help="Exporta predicciones CSV dentro de cada run.")
+    p.add_argument(
+        "--open_set",
+        action="store_true",
+        help="Calibra el umbral con val y evalúa conocidos/desconocidos sobre test.",
+    )
     p.add_argument("--use_augmentation", action="store_true", help="Augmentation al embeder (prueba robustez).")
     p.add_argument(
         "--index_videos",
@@ -150,11 +156,58 @@ def main():
         else:
             print(f"Estrategias de referencia: {[s[0] for s in strategies]}")
 
-        # Cargar splits según --split (select_and_test: solo val en esta pasada)
-        eval_val = args.split in ("val", "both", "select_and_test")
-        eval_test = args.split in ("test", "both") and args.split != "select_and_test"
+        # Open-set siempre calibra con val y reporta una única vez sobre test.
+        eval_val = not args.open_set and args.split in ("val", "both", "select_and_test")
+        eval_test = (
+            not args.open_set
+            and args.split in ("test", "both")
+            and args.split != "select_and_test"
+        )
 
         val_set = []
+        test_set = []
+        unknown_val_set = []
+        unknown_test_set = []
+        if args.open_set:
+            required_splits = (
+                info.val_split_path,
+                info.test_split_path,
+                info.open_set_val_split_path,
+                info.open_set_test_split_path,
+                info.open_set_classes_path,
+            )
+            missing = [path for path in required_splits if not os.path.exists(path)]
+            if missing:
+                print("⚠ El run no contiene todos los artefactos open-set. Faltan:")
+                for path in missing:
+                    print(f"  - {path}")
+                print("  Entrenalo con --open_set_classes N (N >= 2). Saltando.")
+                continue
+
+            val_set = build_val_set(
+                dataset_index, load_val_paths(info.val_split_path)
+            )
+            test_set = build_val_set(
+                dataset_index, load_test_paths(info.test_split_path)
+            )
+            unknown_val_set = build_val_set(
+                dataset_index, load_val_paths(info.open_set_val_split_path)
+            )
+            unknown_test_set = build_val_set(
+                dataset_index, load_test_paths(info.open_set_test_split_path)
+            )
+            print(
+                "Open-set known val/test: "
+                f"{len(val_set)} / {len(test_set)} samples"
+            )
+            print(
+                "Open-set unknown calibration/test: "
+                f"{len(unknown_val_set)} / {len(unknown_test_set)} samples"
+            )
+            if not all((val_set, test_set, unknown_val_set, unknown_test_set)):
+                print("⚠ Uno o más splits open-set están vacíos o no pudieron mapearse al dataset. Saltando.")
+                continue
+
         if eval_val:
             if not os.path.exists(info.val_split_path):
                 print("⚠ No se encontró splits/val_paths.json. Saltando.")
@@ -166,7 +219,6 @@ def main():
                 print("⚠ Validation vacío. Saltando.")
                 continue
 
-        test_set = []
         if eval_test:
             if not os.path.exists(info.test_split_path):
                 print("⚠ No se encontró splits/test_paths.json (run sin split 70/15/15?).")
@@ -178,7 +230,7 @@ def main():
                 if len(test_set) == 0:
                     eval_test = False
 
-        if not eval_val and not eval_test:
+        if not args.open_set and not eval_val and not eval_test:
             continue
 
         # Cargar modelo
@@ -209,6 +261,62 @@ def main():
                     )
                     strategies = list_ref_strategies(versioned_dir)
                     print(f"Estrategias de referencia: {[s[0] for s in strategies]}")
+
+        if args.open_set:
+            if not strategies:
+                print("⚠ No se pudieron crear estrategias de referencia. Saltando.")
+                continue
+
+            open_set_report = {}
+            open_set_report_path = os.path.join(versioned_dir, "open_set_report.json")
+            for strategy_name, ref_path in strategies:
+                ref_data = np.load(ref_path)
+                reference_embeddings = {k: ref_data[k] for k in ref_data.files}
+                out_dir = (
+                    os.path.join(versioned_dir, "evaluation_open_set", strategy_name)
+                    if args.export_csv
+                    else None
+                )
+                print(
+                    f"\n--- Open-set ref: {strategy_name} "
+                    f"({len(reference_embeddings)} clases conocidas) ---"
+                )
+                results = evaluate_open_set(
+                    model=model,
+                    reference_embeddings=reference_embeddings,
+                    known_val_set=val_set,
+                    unknown_val_set=unknown_val_set,
+                    known_test_set=test_set,
+                    unknown_test_set=unknown_test_set,
+                    methods=methods,
+                    n_points=n_points,
+                    device=device,
+                    use_augmentation=args.use_augmentation,
+                    export_csv=args.export_csv,
+                    out_dir=out_dir,
+                )
+                open_set_report[strategy_name] = results
+                for method_name in sorted(
+                    results,
+                    key=lambda name: results[name]["balanced_accuracy"],
+                    reverse=True,
+                ):
+                    metrics = results[method_name]
+                    print(
+                        f"  {method_name:<22} "
+                        f"bal_acc={metrics['balanced_accuracy']:.4f}  "
+                        f"unknown_recall={metrics['unknown_recall']:.4f}  "
+                        f"known_accept={metrics['known_accept_rate']:.4f}  "
+                        f"open_acc={metrics['open_set_accuracy']:.4f}  "
+                        f"auroc={metrics['auroc']:.4f}  "
+                        f"threshold={metrics['threshold']:.6g}"
+                    )
+
+                with open(open_set_report_path, "w", encoding="utf-8") as f:
+                    json.dump(open_set_report, f, indent=2, ensure_ascii=False)
+
+            print(f"\n  [Guardado] {open_set_report_path}")
+            continue
 
         # Cargar reporte existente para reanudar desde donde quedo (no recalcular estrategias ya guardadas)
         run_report_val = {}
@@ -344,6 +452,9 @@ def main():
             _save_evaluation_report(
                 run_name, args.split, run_report_val, run_report_test, versioned_dir
             )
+
+    if args.open_set:
+        return
 
     # Global best (o protocolo select_and_test)
     if args.split == "select_and_test" and global_best[0] is not None:

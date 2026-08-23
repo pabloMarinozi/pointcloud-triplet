@@ -16,6 +16,9 @@ class RunInfo:
     model_path: str
     val_split_path: str
     test_split_path: str
+    open_set_val_split_path: str
+    open_set_test_split_path: str
+    open_set_classes_path: str
 
 
 def index_dataset_by_path(data_dir: str) -> Dict[str, str]:
@@ -73,6 +76,9 @@ def get_run_info(runs_dir: str, run_name: str) -> RunInfo:
         model_path=os.path.join(exp_dir, "model_best.pt"),
         val_split_path=os.path.join(exp_dir, "splits", "val_paths.json"),
         test_split_path=os.path.join(exp_dir, "splits", "test_paths.json"),
+        open_set_val_split_path=os.path.join(exp_dir, "splits", "open_set_val_paths.json"),
+        open_set_test_split_path=os.path.join(exp_dir, "splits", "open_set_test_paths.json"),
+        open_set_classes_path=os.path.join(exp_dir, "splits", "open_set_classes.json"),
     )
 
 
