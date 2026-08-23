@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import time
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
@@ -9,8 +10,9 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score
 
-from src.evaluation.embed import embed_point_cloud_path
+from src.evaluation.embed import embed_point_cloud_paths_multiview
 from src.evaluation.metrics import Method, predict_class, rank_of_label
+from src.evaluation.runtime_stats import peak_process_memory_mb
 from src.evaluation.video_index import get_video_and_capture_form
 
 
@@ -48,6 +50,13 @@ def evaluate_run_on_val(
     export_csv: bool = True,
     out_dir: str | None = None,
     video_index: Dict[str, str] | None = None,
+    sampling: str = "random",
+    seed: int = 42,
+    batch_size: int = 64,
+    views: int = 1,
+    view_aggregation: str = "none",
+    precomputed_embeddings: List[Tuple[str, str, np.ndarray]] | None = None,
+    runtime_stats: Dict[str, object] | None = None,
 ) -> Dict[str, Dict[str, float]]:
     """
     val_set: lista de (true_label, path)
@@ -60,23 +69,29 @@ def evaluate_run_on_val(
     if export_csv:
         os.makedirs(out_dir, exist_ok=True)
 
-    # Una sola pasada: embeddar cada muestra de val una vez
-    val_embeddings: List[Tuple[str, str, np.ndarray]] = []
-    for true_label, path in val_set:
-        emb = embed_point_cloud_path(
+    # Una sola pasada (o caché): embeddar cada muestra una vez para todos los métodos.
+    if precomputed_embeddings is None:
+        val_embeddings = embed_point_cloud_paths_multiview(
             model=model,
-            ply_path=path,
+            samples=val_set,
             n_points=n_points,
             device=device,
             use_augmentation=use_augmentation,
+            sampling=sampling,
+            seed=seed,
+            views=views,
+            view_aggregation=view_aggregation,
+            batch_size=batch_size,
         )
-        val_embeddings.append((true_label, path, emb))
+    else:
+        val_embeddings = precomputed_embeddings
 
     n = len(val_embeddings)
     y_true = [cls for cls, _, _ in val_embeddings]
     results: Dict[str, Dict[str, float]] = {}
 
     for method_name, method in methods.items():
+        started = time.perf_counter()
         y_pred = []
         rows = []
         rank_trues: List[int] = []
@@ -110,6 +125,16 @@ def evaluate_run_on_val(
         metrics = _ranking_metrics(rank_trues, n)
         metrics["accuracy"] = acc  # por si hay rank 0, mantener coherencia con accuracy_score
         results[method_name] = metrics
+        elapsed_seconds = time.perf_counter() - started
+        if runtime_stats is not None:
+            runtime_stats[method_name] = {
+                "query_count": n,
+                "elapsed_seconds": elapsed_seconds,
+                "latency_ms_per_query": (
+                    elapsed_seconds * 1000.0 / n if n else 0.0
+                ),
+                "peak_process_rss_mb": peak_process_memory_mb(),
+            }
 
         if export_csv:
             safe_name = method_name.replace(" ", "_").replace("/", "_")

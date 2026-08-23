@@ -23,28 +23,40 @@ def normalize_unit_sphere(points: np.ndarray) -> np.ndarray:
     return pts / (scale + 1e-8)
 
 
-def sample_n(points: np.ndarray, n_points: int, sampling: str = "random") -> np.ndarray:
+def sample_n(
+    points: np.ndarray,
+    n_points: int,
+    sampling: str = "random",
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
     n = len(points)
+    random_source = rng if rng is not None else np.random
 
     if n >= n_points and sampling == "fps_baya":
         from src.data.io import _fps_from_bayas
         return _fps_from_bayas(points, n_points)
 
     if sampling == "fps" and n >= n_points:
-        idx = np.random.permutation(n)
+        idx = random_source.permutation(n)
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points[idx])
         return np.asarray(pcd.farthest_point_down_sample(n_points).points, dtype=np.float32)
 
     if n >= n_points:
-        idx = np.random.choice(n, n_points, replace=False)
+        idx = random_source.choice(n, n_points, replace=False)
     else:
-        idx = np.random.choice(n, n_points, replace=True)
+        idx = random_source.choice(n, n_points, replace=True)
     return points[idx]
 
 
-def augment(points: np.ndarray, n_points: int, sampling: str = "random") -> np.ndarray:
-    theta = np.random.uniform(-pi, pi)
+def augment(
+    points: np.ndarray,
+    n_points: int,
+    sampling: str = "random",
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    random_source = rng if rng is not None else np.random
+    theta = random_source.uniform(-pi, pi)
     R = np.array(
         [[cos(theta), -sin(theta), 0],
          [sin(theta),  cos(theta), 0],
@@ -53,17 +65,17 @@ def augment(points: np.ndarray, n_points: int, sampling: str = "random") -> np.n
     )
     pts = points @ R.T
 
-    s = np.float32(np.random.uniform(0.8, 1.25))
+    s = np.float32(random_source.uniform(0.8, 1.25))
     pts *= s
 
-    noise = np.clip(np.random.normal(0, 0.01, pts.shape), -0.05, 0.05).astype(np.float32)
+    noise = np.clip(random_source.normal(0, 0.01, pts.shape), -0.05, 0.05).astype(np.float32)
     pts += noise
 
-    keep = max(1, int(len(pts) * np.random.uniform(0.9, 1.0)))
-    idx = np.random.choice(len(pts), keep, replace=False)
+    keep = max(1, int(len(pts) * random_source.uniform(0.9, 1.0)))
+    idx = random_source.choice(len(pts), keep, replace=False)
     pts = pts[idx]
 
-    return sample_n(pts, n_points, sampling)
+    return sample_n(pts, n_points, sampling, rng=rng)
 
 
 PointCloudItem = Tuple[str, str, np.ndarray]  # (folder/class, file_path, cloud_np)

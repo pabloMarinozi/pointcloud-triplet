@@ -13,28 +13,37 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from src.evaluation.embed import embed_point_cloud_path
+from src.evaluation.embed import embed_point_cloud_paths_multiview
 from src.evaluation.metrics import Method, predict_class
 
 
 UNKNOWN_LABEL = "__unknown__"
 
 
-def _embed_set(model, samples, n_points: int, device, use_augmentation: bool):
-    return [
-        (
-            label,
-            path,
-            embed_point_cloud_path(
-                model=model,
-                ply_path=path,
-                n_points=n_points,
-                device=device,
-                use_augmentation=use_augmentation,
-            ),
-        )
-        for label, path in samples
-    ]
+def _embed_set(
+    model,
+    samples,
+    n_points: int,
+    device,
+    use_augmentation: bool,
+    sampling: str = "random",
+    seed: int = 42,
+    batch_size: int = 64,
+    views: int = 1,
+    view_aggregation: str = "none",
+):
+    return embed_point_cloud_paths_multiview(
+        model=model,
+        samples=samples,
+        n_points=n_points,
+        device=device,
+        use_augmentation=use_augmentation,
+        sampling=sampling,
+        seed=seed,
+        views=views,
+        view_aggregation=view_aggregation,
+        batch_size=batch_size,
+    )
 
 
 def _novelty_score(score: float, method: Method) -> float:
@@ -73,6 +82,13 @@ def evaluate_open_set(
     use_augmentation: bool = False,
     export_csv: bool = False,
     out_dir: str | None = None,
+    sampling: str = "random",
+    seed: int = 42,
+    batch_size: int = 64,
+    views: int = 1,
+    view_aggregation: str = "none",
+    calibration_embeddings: List[Tuple[str, str, np.ndarray]] | None = None,
+    test_embeddings: List[Tuple[str, str, np.ndarray]] | None = None,
 ) -> Dict[str, Dict[str, float]]:
     """Calibrate rejection thresholds on val and evaluate once on held-out test."""
     if not known_val_set or not unknown_val_set:
@@ -84,12 +100,34 @@ def evaluate_open_set(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    calibration = _embed_set(
-        model, known_val_set + unknown_val_set, n_points, device, use_augmentation
-    )
-    test = _embed_set(
-        model, known_test_set + unknown_test_set, n_points, device, use_augmentation
-    )
+    calibration = calibration_embeddings
+    if calibration is None:
+        calibration = _embed_set(
+            model,
+            known_val_set + unknown_val_set,
+            n_points,
+            device,
+            use_augmentation,
+            sampling,
+            seed,
+            batch_size,
+            views,
+            view_aggregation,
+        )
+    test = test_embeddings
+    if test is None:
+        test = _embed_set(
+            model,
+            known_test_set + unknown_test_set,
+            n_points,
+            device,
+            use_augmentation,
+            sampling,
+            seed,
+            batch_size,
+            views,
+            view_aggregation,
+        )
     known_labels = set(reference_embeddings)
     results: Dict[str, Dict[str, float]] = {}
 
