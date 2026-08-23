@@ -7,10 +7,12 @@ from src.evaluation.postprocessing import (
     KReciprocalConfig,
     PCAWhitening,
     WhiteningConfig,
+    evaluate_postprocessing,
     k_reciprocal_rerank,
     metrics_from_rankings,
     rank_samples_k_reciprocal,
     reciprocal_rank_fusion,
+    references_from_samples,
 )
 
 
@@ -91,6 +93,50 @@ class PostprocessingTests(unittest.TestCase):
         self.assertEqual(metrics["accuracy"], 0.5)
         self.assertEqual(metrics["top5_accuracy"], 1.0)
         self.assertEqual(metrics["mrr"], 0.75)
+
+    def test_smoke_full_postprocessing_pipeline(self):
+        train = [
+            ("a", "/a/1.ply", np.asarray([0.0, 0.0], dtype=np.float32)),
+            ("a", "/a/2.ply", np.asarray([0.2, 0.1], dtype=np.float32)),
+            ("b", "/b/1.ply", np.asarray([5.0, 0.0], dtype=np.float32)),
+            ("b", "/b/2.ply", np.asarray([5.2, 0.1], dtype=np.float32)),
+            ("c", "/c/1.ply", np.asarray([0.0, 5.0], dtype=np.float32)),
+            ("c", "/c/2.ply", np.asarray([0.1, 5.2], dtype=np.float32)),
+        ]
+        val = [
+            ("a", "/a/val.ply", np.asarray([0.1, 0.1], dtype=np.float32)),
+            ("b", "/b/val.ply", np.asarray([5.1, 0.1], dtype=np.float32)),
+            ("c", "/c/val.ply", np.asarray([0.1, 5.1], dtype=np.float32)),
+        ]
+        test = [
+            ("a", "/a/test.ply", np.asarray([0.05, 0.0], dtype=np.float32)),
+            ("b", "/b/test.ply", np.asarray([5.0, 0.05], dtype=np.float32)),
+            ("c", "/c/test.ply", np.asarray([0.0, 5.05], dtype=np.float32)),
+        ]
+        strategy_names = ["centroid_all", "median_all"]
+        references = references_from_samples(train, strategy_names, seed=42)
+
+        report = evaluate_postprocessing(
+            train_samples=train,
+            val_samples=val,
+            test_samples=test,
+            references_by_strategy=references,
+            methods={"L2 Distance": Method("L2 Distance", l2_distance, False)},
+            whitening_configs=[WhiteningConfig(None, 1e-4)],
+            reranking_configs=[KReciprocalConfig(2, 1, 0.5)],
+            rrf_constants=[20],
+            seed=42,
+        )
+
+        self.assertEqual(
+            set(report["test"]),
+            {"baseline", "whitening", "k_reciprocal", "fusion", "all"},
+        )
+        self.assertEqual(report["test"]["all"]["metrics"]["accuracy"], 1.0)
+        self.assertEqual(
+            report["protocol"],
+            "select_hyperparameters_on_val_then_apply_unchanged_to_test",
+        )
 
 
 if __name__ == "__main__":

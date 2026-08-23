@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -129,7 +129,7 @@ def rank_samples(
         )
         order = np.argsort(scores, kind="stable")
         if method.maximize:
-            order = order[::-1]
+            order = np.argsort(-scores, kind="stable")
         rankings.append([labels[index] for index in order])
     return rankings
 
@@ -309,4 +309,356 @@ def metrics_from_rankings(
         "mrr": sum(1.0 / rank for rank in valid) / count,
         "mean_rank": float(np.mean(valid)) if valid else 0.0,
         "median_rank": float(np.median(valid)) if valid else 0.0,
+    }
+
+
+def _candidate(
+    metrics: Dict[str, float],
+    *,
+    strategy: str,
+    method: str,
+    parameters: Dict[str, object] | None = None,
+) -> Dict[str, object]:
+    return {
+        "strategy": strategy,
+        "method": method,
+        "parameters": parameters or {},
+        "metrics": {name: float(value) for name, value in metrics.items()},
+    }
+
+
+def _best_candidate(candidates: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    if not candidates:
+        raise ValueError("No hay candidatos para seleccionar")
+
+    def selection_key(candidate: Dict[str, object]) -> Tuple[float, ...]:
+        metrics = candidate["metrics"]
+        assert isinstance(metrics, dict)
+        return (
+            float(metrics["accuracy"]),
+            float(metrics["mrr"]),
+            float(metrics["top5_accuracy"]),
+            float(metrics["top10_accuracy"]),
+            -float(metrics["mean_rank"]),
+        )
+
+    return dict(max(candidates, key=selection_key))
+
+
+def _fit_whitening(
+    train_samples: Sequence[EmbeddingSample], config: WhiteningConfig
+) -> PCAWhitening:
+    train_matrix = np.stack([embedding for _, _, embedding in train_samples])
+    return PCAWhitening(config).fit(train_matrix)
+
+
+def _selected_parameters(
+    candidate: Dict[str, object], group: str
+) -> Dict[str, object]:
+    parameters = candidate["parameters"]
+    assert isinstance(parameters, dict)
+    selected = parameters[group]
+    assert isinstance(selected, dict)
+    return selected
+
+
+def _whitening_from_parameters(parameters: Mapping[str, object]) -> WhiteningConfig:
+    n_components = parameters["n_components"]
+    return WhiteningConfig(
+        n_components=None if n_components is None else int(n_components),
+        shrinkage=float(parameters["shrinkage"]),
+    )
+
+
+def _reranking_from_parameters(parameters: Mapping[str, object]) -> KReciprocalConfig:
+    return KReciprocalConfig(
+        k1=int(parameters["k1"]),
+        k2=int(parameters["k2"]),
+        lambda_value=float(parameters["lambda"]),
+    )
+
+
+def evaluate_postprocessing(
+    *,
+    train_samples: Sequence[EmbeddingSample],
+    val_samples: Sequence[EmbeddingSample],
+    test_samples: Sequence[EmbeddingSample],
+    references_by_strategy: Mapping[str, References],
+    methods: Mapping[str, Method],
+    whitening_configs: Sequence[WhiteningConfig],
+    reranking_configs: Sequence[KReciprocalConfig],
+    rrf_constants: Sequence[int],
+    seed: int = 42,
+    fusion_strategies: Sequence[str] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> Dict[str, object]:
+    """Selecciona configuraciones en val y las aplica sin cambios sobre test."""
+    if not train_samples:
+        raise ValueError("El post-procesamiento requiere embeddings de train")
+    if not val_samples:
+        raise ValueError("El post-procesamiento requiere embeddings de val")
+    if not references_by_strategy:
+        raise ValueError("No hay estrategias de referencia")
+    if not methods:
+        raise ValueError("No hay métodos para post-procesar")
+    if not whitening_configs or not reranking_configs or not rrf_constants:
+        raise ValueError("Las grillas de post-procesamiento no pueden estar vacías")
+
+    strategy_names = list(fusion_strategies or references_by_strategy)
+    missing = set(strategy_names).difference(references_by_strategy)
+    if missing:
+        raise ValueError(
+            f"Estrategias pedidas para RRF no disponibles: {sorted(missing)}"
+        )
+
+    emit = progress or (lambda _message: None)
+    candidates: Dict[str, List[Dict[str, object]]] = {
+        "baseline": [],
+        "whitening": [],
+        "k_reciprocal": [],
+        "fusion": [],
+        "all": [],
+    }
+    base_val_rankings: Dict[Tuple[str, str], List[Ranking]] = {}
+
+    emit("Post-procesamiento: baseline")
+    for strategy, references in references_by_strategy.items():
+        for method_name, method in methods.items():
+            rankings = rank_samples(val_samples, references, method)
+            base_val_rankings[(strategy, method_name)] = rankings
+            candidates["baseline"].append(
+                _candidate(
+                    metrics_from_rankings(val_samples, rankings),
+                    strategy=strategy,
+                    method=method_name,
+                )
+            )
+
+    emit("Post-procesamiento: grilla de PCA whitening")
+    whitening_val_cache: Dict[
+        WhiteningConfig, Tuple[List[EmbeddingSample], Dict[str, References]]
+    ] = {}
+    for whitening_config in whitening_configs:
+        transform = _fit_whitening(train_samples, whitening_config)
+        whitened_train = transform_samples(train_samples, transform)
+        whitened_val = transform_samples(val_samples, transform)
+        whitened_references = references_from_samples(
+            whitened_train, list(references_by_strategy), seed
+        )
+        whitening_val_cache[whitening_config] = (
+            whitened_val,
+            whitened_references,
+        )
+        for strategy, references in whitened_references.items():
+            for method_name, method in methods.items():
+                rankings = rank_samples(whitened_val, references, method)
+                candidates["whitening"].append(
+                    _candidate(
+                        metrics_from_rankings(whitened_val, rankings),
+                        strategy=strategy,
+                        method=method_name,
+                        parameters={"whitening": whitening_config.as_dict()},
+                    )
+                )
+
+    emit("Post-procesamiento: grilla k-recíproca")
+    for reranking_config in reranking_configs:
+        for strategy, references in references_by_strategy.items():
+            for method_name, method in methods.items():
+                rankings = rank_samples_k_reciprocal(
+                    val_samples, references, method, reranking_config
+                )
+                candidates["k_reciprocal"].append(
+                    _candidate(
+                        metrics_from_rankings(val_samples, rankings),
+                        strategy=strategy,
+                        method=method_name,
+                        parameters={
+                            "k_reciprocal": reranking_config.as_dict()
+                        },
+                    )
+                )
+
+    emit("Post-procesamiento: grilla de Reciprocal Rank Fusion")
+    for constant in rrf_constants:
+        for method_name in methods:
+            source_rankings = {
+                strategy: base_val_rankings[(strategy, method_name)]
+                for strategy in strategy_names
+            }
+            rankings = reciprocal_rank_fusion(source_rankings, constant)
+            candidates["fusion"].append(
+                _candidate(
+                    metrics_from_rankings(val_samples, rankings),
+                    strategy="rank_fusion",
+                    method=method_name,
+                    parameters={
+                        "rrf": {
+                            "constant": constant,
+                            "strategies": strategy_names,
+                        }
+                    },
+                )
+            )
+
+    selected = {
+        variant: _best_candidate(variant_candidates)
+        for variant, variant_candidates in candidates.items()
+        if variant != "all"
+    }
+    selected_whitening = _whitening_from_parameters(
+        _selected_parameters(selected["whitening"], "whitening")
+    )
+    selected_reranking = _reranking_from_parameters(
+        _selected_parameters(selected["k_reciprocal"], "k_reciprocal")
+    )
+    selected_rrf = _selected_parameters(selected["fusion"], "rrf")
+    whitened_val, whitened_references = whitening_val_cache[selected_whitening]
+
+    emit("Post-procesamiento: whitening + k-recíproco + fusión")
+    for method_name, method in methods.items():
+        source_rankings = {
+            strategy: rank_samples_k_reciprocal(
+                whitened_val,
+                whitened_references[strategy],
+                method,
+                selected_reranking,
+            )
+            for strategy in strategy_names
+        }
+        rankings = reciprocal_rank_fusion(
+            source_rankings, int(selected_rrf["constant"])
+        )
+        candidates["all"].append(
+            _candidate(
+                metrics_from_rankings(whitened_val, rankings),
+                strategy="whitened_k_reciprocal_rank_fusion",
+                method=method_name,
+                parameters={
+                    "whitening": selected_whitening.as_dict(),
+                    "k_reciprocal": selected_reranking.as_dict(),
+                    "rrf": {
+                        "constant": int(selected_rrf["constant"]),
+                        "strategies": strategy_names,
+                    },
+                },
+            )
+        )
+    selected["all"] = _best_candidate(candidates["all"])
+
+    test_results: Dict[str, Dict[str, object]] = {}
+    if test_samples:
+        emit("Post-procesamiento: aplicación final sobre test")
+        baseline_choice = selected["baseline"]
+        baseline_strategy = str(baseline_choice["strategy"])
+        baseline_method_name = str(baseline_choice["method"])
+        baseline_ranking = rank_samples(
+            test_samples,
+            references_by_strategy[baseline_strategy],
+            methods[baseline_method_name],
+        )
+        test_results["baseline"] = _candidate(
+            metrics_from_rankings(test_samples, baseline_ranking),
+            strategy=baseline_strategy,
+            method=baseline_method_name,
+        )
+
+        whitening_transform = _fit_whitening(train_samples, selected_whitening)
+        whitened_train = transform_samples(train_samples, whitening_transform)
+        whitened_test = transform_samples(test_samples, whitening_transform)
+        final_whitened_references = references_from_samples(
+            whitened_train, list(references_by_strategy), seed
+        )
+
+        whitening_choice = selected["whitening"]
+        whitening_strategy = str(whitening_choice["strategy"])
+        whitening_method_name = str(whitening_choice["method"])
+        whitening_ranking = rank_samples(
+            whitened_test,
+            final_whitened_references[whitening_strategy],
+            methods[whitening_method_name],
+        )
+        test_results["whitening"] = _candidate(
+            metrics_from_rankings(whitened_test, whitening_ranking),
+            strategy=whitening_strategy,
+            method=whitening_method_name,
+            parameters={"whitening": selected_whitening.as_dict()},
+        )
+
+        reranking_choice = selected["k_reciprocal"]
+        reranking_strategy = str(reranking_choice["strategy"])
+        reranking_method_name = str(reranking_choice["method"])
+        reranking_ranks = rank_samples_k_reciprocal(
+            test_samples,
+            references_by_strategy[reranking_strategy],
+            methods[reranking_method_name],
+            selected_reranking,
+        )
+        test_results["k_reciprocal"] = _candidate(
+            metrics_from_rankings(test_samples, reranking_ranks),
+            strategy=reranking_strategy,
+            method=reranking_method_name,
+            parameters={"k_reciprocal": selected_reranking.as_dict()},
+        )
+
+        fusion_choice = selected["fusion"]
+        fusion_method_name = str(fusion_choice["method"])
+        fusion_sources = {
+            strategy: rank_samples(
+                test_samples,
+                references_by_strategy[strategy],
+                methods[fusion_method_name],
+            )
+            for strategy in strategy_names
+        }
+        fusion_ranks = reciprocal_rank_fusion(
+            fusion_sources, int(selected_rrf["constant"])
+        )
+        test_results["fusion"] = _candidate(
+            metrics_from_rankings(test_samples, fusion_ranks),
+            strategy="rank_fusion",
+            method=fusion_method_name,
+            parameters={
+                "rrf": {
+                    "constant": int(selected_rrf["constant"]),
+                    "strategies": strategy_names,
+                }
+            },
+        )
+
+        all_choice = selected["all"]
+        all_method_name = str(all_choice["method"])
+        all_sources = {
+            strategy: rank_samples_k_reciprocal(
+                whitened_test,
+                final_whitened_references[strategy],
+                methods[all_method_name],
+                selected_reranking,
+            )
+            for strategy in strategy_names
+        }
+        all_ranks = reciprocal_rank_fusion(
+            all_sources, int(selected_rrf["constant"])
+        )
+        test_results["all"] = _candidate(
+            metrics_from_rankings(whitened_test, all_ranks),
+            strategy="whitened_k_reciprocal_rank_fusion",
+            method=all_method_name,
+            parameters=dict(all_choice["parameters"]),
+        )
+
+    return {
+        "format_version": 1,
+        "protocol": "select_hyperparameters_on_val_then_apply_unchanged_to_test",
+        "grids": {
+            "whitening": [config.as_dict() for config in whitening_configs],
+            "k_reciprocal": [config.as_dict() for config in reranking_configs],
+            "rrf_constants": [int(value) for value in rrf_constants],
+            "methods": list(methods),
+            "fusion_strategies": strategy_names,
+        },
+        "validation_candidates": candidates,
+        "selected_on_val": selected,
+        "val": selected,
+        "test": test_results,
     }
