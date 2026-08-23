@@ -292,12 +292,12 @@ class KReciprocalRanker:
             self.query_distances, axis=1, kind="stable"
         )
         self._gallery_weight_cache: Dict[
-            Tuple[int, int], Tuple[np.ndarray, List[np.ndarray]]
+            Tuple[int, int], Tuple[np.ndarray, List[np.ndarray], np.ndarray]
         ] = {}
 
     def _gallery_weights(
         self, k1: int, k2: int
-    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+    ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray]:
         cache_key = (k1, k2)
         if cache_key in self._gallery_weight_cache:
             return self._gallery_weight_cache[cache_key]
@@ -334,16 +334,17 @@ class KReciprocalRanker:
             affinity = np.exp(-self.gallery_distances[index, expanded])
             weights[index, expanded] = affinity / max(float(affinity.sum()), 1e-12)
 
+        base_weights = weights
         k2 = min(k2, self.gallery_count)
         if k2 > 1:
             weights = np.asarray(
                 [
-                    weights[self.gallery_order[index, :k2]].mean(axis=0)
+                    base_weights[self.gallery_order[index, :k2]].mean(axis=0)
                     for index in range(self.gallery_count)
                 ],
                 dtype=np.float32,
             )
-        result = weights, expanded_sets
+        result = weights, expanded_sets, base_weights
         self._gallery_weight_cache[cache_key] = result
         return result
 
@@ -353,9 +354,11 @@ class KReciprocalRanker:
         if not 0.0 <= config.lambda_value <= 1.0:
             raise ValueError("lambda debe estar entre 0 y 1")
         k1 = min(config.k1, self.gallery_count - 1)
-        gallery_weights, gallery_expanded_sets = self._gallery_weights(
-            k1, config.k2
-        )
+        (
+            gallery_weights,
+            gallery_expanded_sets,
+            base_gallery_weights,
+        ) = self._gallery_weights(k1, config.k2)
         query_weights = np.zeros_like(self.query_distances)
         gallery_threshold = np.partition(
             self.gallery_raw, kth=k1, axis=1
@@ -390,7 +393,8 @@ class KReciprocalRanker:
             for query_index in range(self.query_count):
                 neighbors = self.query_order[query_index, :neighbor_count]
                 expanded_query_weights[query_index] = (
-                    query_weights[query_index] + gallery_weights[neighbors].sum(axis=0)
+                    query_weights[query_index]
+                    + base_gallery_weights[neighbors].sum(axis=0)
                 ) / (len(neighbors) + 1)
             query_weights = expanded_query_weights
 
