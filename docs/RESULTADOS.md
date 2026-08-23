@@ -100,6 +100,62 @@ los 5 runs restantes). Reportes en `runs/<run>/ep200/evaluation_report.json`.
 - `L1 Distance` (y en menor medida L2/Cosine) son los mejores métodos; `Dot Product` va mal.
 - `centroid_all` y `multiprototype_k5` superan a `centroid_5/10/20`.
 
+### 3.3 Post-procesamiento de embeddings (ep3000)
+
+La comparación debe ejecutarse sobre
+`w8_np512_m0.5_lr3e-4_bs16_seed42_fps` a ep3000 con seed 42. Los
+hiperparámetros se seleccionan usando solamente val y se aplican sin cambios a
+test. La ejecución quedó pendiente para respetar la restricción de no correr la
+evaluación durante la implementación; no se completan valores a partir de
+estimaciones.
+
+| Variante seleccionada en val | Val acc | Val top5 | Val top10 | Val MRR | Test acc | Test top5 | Test top10 | Test MRR |
+|-------------------------------|---------|----------|-----------|---------|----------|-----------|------------|----------|
+| Baseline | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
+| + PCA whitening | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
+| + k-recíproco | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
+| + rank fusion (RRF) | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
+| Whitening + k-recíproco + RRF | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente | Pendiente |
+
+Los algoritmos implementados son:
+
+- **PCA whitening:** ajusta media, ejes principales y varianzas exclusivamente
+  con embeddings individuales de train. Proyecta train, val y test, y divide
+  cada componente por la desviación regularizada antes de reconstruir las
+  estrategias de referencia.
+- **Re-ranking k-recíproco:** forma vecindades recíprocas entre la query y las
+  clases de la galería, las expande y combina distancia Jaccard con la distancia
+  original. Funciona también cuando una clase tiene varios prototipos.
+- **Reciprocal Rank Fusion:** fusiona los rankings producidos por las estrategias
+  de referencia mediante `sum(1 / (k + rank))`. No usa scores incompatibles entre
+  estrategias ni consulta las etiquetas verdaderas.
+
+La grilla default compara dimensiones PCA `all/128/256`, shrinkage
+`1e-4/1e-2`, `k1=10/20`, `k2=3/6`, `lambda=0.3/0.5` y constante RRF
+`20/60`, sobre Cosine, L2 y L1. Primero se elige la mejor configuración de cada
+técnica en val; el stack usa esos hiperparámetros y vuelve a elegir solamente el
+método en val. Todos los candidatos, selecciones y métricas finales quedan bajo
+`postprocessing` en `evaluation_report.json`.
+
+Comando para producir la tabla:
+
+```bash
+python -m src.eval \
+  --data_dir <ruta_a_ply> \
+  --runs_dir runs \
+  --run w8_np512_m0.5_lr3e-4_bs16_seed42_fps \
+  --split both \
+  --seed 42 \
+  --postprocess
+```
+
+Resumen estructurado para copiar los resultados:
+
+```bash
+jq '.postprocessing | {val, test}' \
+  runs/w8_np512_m0.5_lr3e-4_bs16_seed42_fps/ep3000/evaluation_report.json
+```
+
 ---
 
 ## 4. Sugerencias
