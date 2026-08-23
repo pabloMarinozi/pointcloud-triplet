@@ -754,6 +754,10 @@ def main():
                     for section in ("reference_generation", "embedding_caches"):
                         if existing_runtime.get(section):
                             evaluation_runtime[section] = existing_runtime[section]
+                    if args.postprocess and existing_runtime.get("postprocessing"):
+                        evaluation_runtime["postprocessing"] = existing_runtime[
+                            "postprocessing"
+                        ]
                     existing_classification = existing_runtime.get("classification") or {}
                     for split_name in ("val", "test"):
                         evaluation_runtime["classification"][split_name].update(
