@@ -38,6 +38,45 @@ STRATEGY_NAMES = {
 }
 
 
+def build_strategy_references(
+    strategy: str,
+    class_to_embs: Dict[str, List[np.ndarray]],
+    seed: int = SEED,
+) -> Dict[str, np.ndarray]:
+    """Construye una estrategia por nombre desde embeddings individuales."""
+    builders = {
+        "centroid_5": lambda: build_references_centroid(
+            class_to_embs, 5, seed=seed
+        ),
+        "centroid_10": lambda: build_references_centroid(
+            class_to_embs, 10, seed=seed
+        ),
+        "centroid_20": lambda: build_references_centroid(
+            class_to_embs, 20, seed=seed
+        ),
+        "centroid_all": lambda: build_references_centroid(
+            class_to_embs, None, seed=seed
+        ),
+        "median_all": lambda: build_references_median(class_to_embs),
+        "trimmed_mean_05": lambda: build_references_trimmed_mean(
+            class_to_embs, 0.05
+        ),
+        "trimmed_mean_10": lambda: build_references_trimmed_mean(
+            class_to_embs, 0.10
+        ),
+        "centroid_l2norm_5": lambda: build_references_centroid_l2norm(
+            class_to_embs, 5, seed=seed
+        ),
+        "multiprototype_k5": lambda: build_references_multiprototype(
+            class_to_embs, 5, seed=seed
+        ),
+    }
+    try:
+        return builders[strategy]()
+    except KeyError as exc:
+        raise ValueError(f"Estrategia desconocida: {strategy}") from exc
+
+
 def _l2_normalize(x: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(x, axis=-1, keepdims=True)
     n = np.where(n > 1e-12, n, 1.0)
@@ -164,57 +203,13 @@ def save_all_strategies(
 ) -> List[str]:
     """Construye y guarda todas las estrategias desde los mismos embeddings."""
     saved = []
-    refs = build_references_centroid(class_to_embs, 5, seed=seed)
-    path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="centroid_5"))
-    np.savez(path, **refs)
-    saved.append("centroid_5")
-
-    refs = build_references_centroid(class_to_embs, 10, seed=seed)
-    path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="centroid_10"))
-    np.savez(path, **refs)
-    saved.append("centroid_10")
-
-    refs = build_references_centroid(class_to_embs, 20, seed=seed)
-    path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="centroid_20"))
-    np.savez(path, **refs)
-    saved.append("centroid_20")
-
-    # centroid_all = centroide usando TODOS los embeddings de train (no solo 5/10/20)
-    refs = build_references_centroid(class_to_embs, n_samples=None, seed=seed)
-    path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="centroid_all"))
-    np.savez(path, **refs)
-    saved.append("centroid_all")
-
-    refs = build_references_median(class_to_embs)
-    path = os.path.join(
-        exp_dir, STRATEGY_REF_BASENAME.format(strategy="median_all")
-    )
-    np.savez(path, **refs)
-    saved.append("median_all")
-
-    refs = build_references_trimmed_mean(class_to_embs, proportion_to_cut=0.05)
-    path = os.path.join(
-        exp_dir, STRATEGY_REF_BASENAME.format(strategy="trimmed_mean_05")
-    )
-    np.savez(path, **refs)
-    saved.append("trimmed_mean_05")
-
-    refs = build_references_trimmed_mean(class_to_embs, proportion_to_cut=0.10)
-    path = os.path.join(
-        exp_dir, STRATEGY_REF_BASENAME.format(strategy="trimmed_mean_10")
-    )
-    np.savez(path, **refs)
-    saved.append("trimmed_mean_10")
-
-    refs = build_references_centroid_l2norm(class_to_embs, 5, seed=seed)
-    path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="centroid_l2norm_5"))
-    np.savez(path, **refs)
-    saved.append("centroid_l2norm_5")
-
-    refs = build_references_multiprototype(class_to_embs, 5, seed=seed)
-    path = os.path.join(exp_dir, STRATEGY_REF_BASENAME.format(strategy="multiprototype_k5"))
-    np.savez(path, **refs)
-    saved.append("multiprototype_k5")
+    for strategy in sorted(STRATEGY_NAMES):
+        refs = build_strategy_references(strategy, class_to_embs, seed=seed)
+        path = os.path.join(
+            exp_dir, STRATEGY_REF_BASENAME.format(strategy=strategy)
+        )
+        np.savez(path, **refs)
+        saved.append(strategy)
 
     return saved
 
