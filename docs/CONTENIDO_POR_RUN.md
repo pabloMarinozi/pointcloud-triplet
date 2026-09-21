@@ -29,7 +29,7 @@ La eval usa la época actual del run (`last_epoch.json` o `model_version.json`) 
 |-------------------|-----------|
 | **model.pt** | Copia del modelo (state_dict) usada en esta evaluación. Si seguís entrenando, `model_best.pt` en la raíz se actualiza; con `ep<N>/model.pt` podés recuperar la versión de esa época. |
 | **reference_embeddings_centroid_5.npz**, **centroid_10**, … | Estrategias que genera la eval si no existen (centroid_5, centroid_10, centroid_20, centroid_all, centroid_l2norm_5, multiprototype_k5). |
-| **evaluation_report.json** | Resumen: accuracy por estrategia y método; `best_val` (estrategia, método, accuracy). |
+| **evaluation_report.json** | Resumen: accuracy por estrategia y método; `best_val` (estrategia, método, accuracy). Con `--postprocess`, agrega grillas, candidatos de val, configuración seleccionada y métricas val/test de baseline, whitening, k-recíproco, RRF y el stack. |
 | **evaluation/** | Solo con `--export_csv`: subcarpetas por estrategia con CSVs de predicciones por método. |
 | **evaluation_test/** | Solo con `--export_csv` y si evaluás test: igual que `evaluation/` para el split de test. |
 
@@ -73,3 +73,20 @@ runs/<run_name>/
 
 - **Salida de consola** de la eval: no se persiste por defecto (podés redirigir con `> reporte.txt`).
 - **Predicciones detalladas** (por muestra): solo si usás `--export_csv`.
+
+---
+
+## 5. Post-procesamiento opcional
+
+`python -m src.eval ... --split both --postprocess` reutiliza el caché individual
+de train para ajustar PCA whitening. No crea checkpoints ni modifica las
+referencias baseline: las referencias transformadas se reconstruyen en memoria.
+El bloque `postprocessing` de `evaluation_report.json` contiene:
+
+- `grids`: espacio de búsqueda y estrategias fusionadas;
+- `validation_candidates`: todas las combinaciones medidas sólo en val;
+- `selected_on_val` y `val`: ganadores para baseline y cada mejora;
+- `test`: esas mismas decisiones aplicadas sin reajuste sobre test.
+
+Cambiar una grilla, método o estrategia modifica el manifiesto de evaluación, por
+lo que un reporte incompatible no se reutiliza accidentalmente.

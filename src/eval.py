@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import shutil
+import time
 
 import numpy as np
 import torch
@@ -28,8 +30,16 @@ from src.evaluation.embedding_cache import (
 )
 from src.evaluation.metrics import default_methods
 from src.evaluation.open_set import evaluate_open_set
+from src.evaluation.postprocessing import (
+    KReciprocalConfig,
+    WhiteningConfig,
+    evaluate_postprocessing,
+)
 from src.evaluation.report import evaluate_run_on_val, summarize_errors_by_class
-from src.evaluation.ref_strategies import ensure_all_strategies_saved
+from src.evaluation.ref_strategies import (
+    STRATEGY_NAMES,
+    ensure_all_strategies_saved,
+)
 from src.evaluation.video_index import load_video_index
 from src.models.triplet import TripletNet
 from src.utils.seed import set_seed
@@ -87,7 +97,135 @@ def parse_args():
         default="index_videos.csv",
         help="CSV con columnas video, forma (forma de captura). Si existe, se agregan columnas video y capture_form al CSV de predicciones.",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--postprocess",
+        action="store_true",
+        help="Compara baseline, whitening, k-recíproco, RRF y las tres técnicas apiladas.",
+    )
+    p.add_argument(
+        "--postprocess_method",
+        action="append",
+        choices=tuple(default_methods()),
+        help="Método a incluir en el mini-grid; se puede repetir. Default: cosine, L2 y L1.",
+    )
+    p.add_argument(
+        "--whitening_dims_grid",
+        default="all,128,256",
+        help="Dimensiones PCA separadas por coma; 'all' conserva el máximo posible.",
+    )
+    p.add_argument(
+        "--whitening_shrinkage_grid",
+        default="0.0001,0.01",
+        help="Factores de shrinkage de whitening separados por coma.",
+    )
+    p.add_argument(
+        "--rerank_k1_grid",
+        default="10,20",
+        help="Valores k1 de k-recíproco separados por coma.",
+    )
+    p.add_argument(
+        "--rerank_k2_grid",
+        default="3,6",
+        help="Valores k2 de k-recíproco separados por coma.",
+    )
+    p.add_argument(
+        "--rerank_lambda_grid",
+        default="0.3,0.5",
+        help="Valores lambda de k-recíproco separados por coma.",
+    )
+    p.add_argument(
+        "--rrf_k_grid",
+        default="20,60",
+        help="Constantes k de Reciprocal Rank Fusion separadas por coma.",
+    )
+    p.add_argument(
+        "--fusion_strategies",
+        default="all",
+        help="Nombres de estrategias a fusionar separados por coma, o 'all'.",
+    )
+    args = p.parse_args()
+    if args.postprocess and args.open_set:
+        p.error("--postprocess no es compatible con --open_set")
+    if args.postprocess and args.split not in ("val", "both"):
+        p.error("--postprocess requiere --split val o --split both para seleccionar en val")
+    return args
+
+
+def _parse_grid(raw: str, cast, name: str):
+    try:
+        values = [cast(item.strip()) for item in raw.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError(f"Grilla inválida para {name}: {raw}") from exc
+    if not values:
+        raise ValueError(f"La grilla {name} no puede estar vacía")
+    return list(dict.fromkeys(values))
+
+
+def _parse_whitening_dims(raw: str) -> list[int | None]:
+    def parse_dimension(value: str) -> int | None:
+        if value.lower() == "all":
+            return None
+        dimension = int(value)
+        if dimension < 1:
+            raise ValueError
+        return dimension
+
+    return _parse_grid(raw, parse_dimension, "whitening_dims_grid")
+
+
+def _postprocessing_configuration(args, all_methods):
+    method_names = args.postprocess_method or [
+        "Cosine Similarity",
+        "L2 Distance",
+        "L1 Distance",
+    ]
+    methods = {name: all_methods[name] for name in method_names}
+    dimensions = _parse_whitening_dims(args.whitening_dims_grid)
+    shrinkages = _parse_grid(
+        args.whitening_shrinkage_grid, float, "whitening_shrinkage_grid"
+    )
+    if any(value < 0.0 for value in shrinkages):
+        raise ValueError("Los valores de whitening shrinkage no pueden ser negativos")
+    whitening_configs = [
+        WhiteningConfig(dimension, shrinkage)
+        for dimension, shrinkage in itertools.product(dimensions, shrinkages)
+    ]
+
+    k1_values = _parse_grid(args.rerank_k1_grid, int, "rerank_k1_grid")
+    k2_values = _parse_grid(args.rerank_k2_grid, int, "rerank_k2_grid")
+    lambda_values = _parse_grid(
+        args.rerank_lambda_grid, float, "rerank_lambda_grid"
+    )
+    if any(value < 1 for value in k1_values + k2_values):
+        raise ValueError("k1 y k2 deben ser positivos")
+    if any(not 0.0 <= value <= 1.0 for value in lambda_values):
+        raise ValueError("Los valores lambda deben estar entre 0 y 1")
+    reranking_configs = [
+        KReciprocalConfig(k1, k2, lambda_value)
+        for k1, k2, lambda_value in itertools.product(
+            k1_values, k2_values, lambda_values
+        )
+    ]
+
+    rrf_constants = _parse_grid(args.rrf_k_grid, int, "rrf_k_grid")
+    if any(value < 1 for value in rrf_constants):
+        raise ValueError("Las constantes de RRF deben ser positivas")
+    fusion_strategies = None
+    if args.fusion_strategies != "all":
+        fusion_strategies = [
+            value.strip()
+            for value in args.fusion_strategies.split(",")
+            if value.strip()
+        ]
+        if not fusion_strategies:
+            raise ValueError("--fusion_strategies no puede quedar vacío")
+    return (
+        methods,
+        whitening_configs,
+        reranking_configs,
+        rrf_constants,
+        fusion_strategies,
+    )
 
 
 def _save_evaluation_report(
@@ -98,6 +236,7 @@ def _save_evaluation_report(
     versioned_dir: str,
     evaluation_manifest: dict,
     evaluation_runtime: dict,
+    postprocessing_report: dict | None = None,
 ) -> None:
     """Guarda evaluation_report.json con el estado actual (val/test por estrategia)."""
     if not run_report_val and not run_report_test:
@@ -110,6 +249,8 @@ def _save_evaluation_report(
         "evaluation_manifest": evaluation_manifest,
         "runtime": evaluation_runtime,
     }
+    if postprocessing_report:
+        report["postprocessing"] = postprocessing_report
     if run_report_val:
         best_s, best_m = max(
             (
@@ -123,10 +264,46 @@ def _save_evaluation_report(
             "method": best_m,
             "accuracy": run_report_val[best_s][best_m]["accuracy"],
         }
+    if postprocessing_report and postprocessing_report.get("selected_on_val"):
+        selected = postprocessing_report["selected_on_val"]
+        best_variant = max(
+            selected,
+            key=lambda variant: selected[variant]["metrics"]["accuracy"],
+        )
+        best = selected[best_variant]
+        report["best_postprocessing_val"] = {
+            "variant": best_variant,
+            "strategy": best["strategy"],
+            "method": best["method"],
+            "parameters": best["parameters"],
+            "metrics": best["metrics"],
+        }
     report_path = os.path.join(versioned_dir, "evaluation_report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     print(f"\n  [Guardado] {report_path}")
+
+
+def _print_postprocessing_summary(report: dict) -> None:
+    print("\n  POST-PROCESSING (seleccionado exclusivamente en val):")
+    for variant in ("baseline", "whitening", "k_reciprocal", "fusion", "all"):
+        val_entry = report["val"][variant]
+        val_metrics = val_entry["metrics"]
+        line = (
+            f"    {variant:<14} val acc={val_metrics['accuracy']:.4f}  "
+            f"top5={val_metrics['top5_accuracy']:.4f}  "
+            f"top10={val_metrics['top10_accuracy']:.4f}  "
+            f"mrr={val_metrics['mrr']:.4f}"
+        )
+        if variant in report["test"]:
+            test_metrics = report["test"][variant]["metrics"]
+            line += (
+                f" | test acc={test_metrics['accuracy']:.4f}  "
+                f"top5={test_metrics['top5_accuracy']:.4f}  "
+                f"top10={test_metrics['top10_accuracy']:.4f}  "
+                f"mrr={test_metrics['mrr']:.4f}"
+            )
+        print(line)
 
 
 def main():
@@ -148,6 +325,14 @@ def main():
     print(f"Dataset indexado: {len(dataset_index)} clouds")
 
     methods = default_methods()
+    postprocessing_configuration = None
+    if args.postprocess:
+        try:
+            postprocessing_configuration = _postprocessing_configuration(
+                args, methods
+            )
+        except ValueError as exc:
+            raise SystemExit(f"Configuración de post-procesamiento inválida: {exc}")
     run_names = resolve_run(args.runs_dir, args.run)
 
     # Se usa siempre para que el caché conserve video y forma de captura.
@@ -312,11 +497,33 @@ def main():
                 if samples
             },
         }
+        if postprocessing_configuration is not None:
+            (
+                postprocess_methods,
+                whitening_configs,
+                reranking_configs,
+                rrf_constants,
+                configured_fusion_strategies,
+            ) = postprocessing_configuration
+            evaluation_manifest["postprocessing"] = {
+                "format_version": 1,
+                "methods": list(postprocess_methods),
+                "whitening_grid": [
+                    config.as_dict() for config in whitening_configs
+                ],
+                "k_reciprocal_grid": [
+                    config.as_dict() for config in reranking_configs
+                ],
+                "rrf_constants": rrf_constants,
+                "fusion_strategies": configured_fusion_strategies or "all",
+            }
         evaluation_runtime = {
             "reference_generation": {},
             "embedding_caches": {},
             "classification": {"val": {}, "test": {}},
         }
+        if args.postprocess:
+            evaluation_runtime["postprocessing"] = {}
 
         # Guardar copia del modelo en ep<N>/ para poder recuperar esta versión si seguís entrenando
         if versioned_dir != info.exp_dir:
@@ -325,6 +532,7 @@ def main():
             print(f"  Modelo guardado en ep{version}/model.pt")
 
         # El manifiesto decide si el caché/las referencias se pueden reutilizar.
+        train_embeddings = None
         train_split_path = get_train_split_path(info.exp_dir)
         if os.path.exists(train_split_path):
             train_paths = load_train_paths(train_split_path)
@@ -352,6 +560,27 @@ def main():
                 )
                 strategies = list_ref_strategies(evaluation_dir)
                 print(f"Estrategias de referencia: {[s[0] for s in strategies]}")
+                if args.postprocess:
+                    train_embeddings = ensure_embedding_cache(
+                        cache_dir=evaluation_dir,
+                        split="train",
+                        model=model,
+                        samples=train_set,
+                        n_points=n_points,
+                        device=device,
+                        checkpoint_path=info.model_path,
+                        checkpoint_sha256=checkpoint_sha256,
+                        sampling=sampling,
+                        seed=args.seed,
+                        use_augmentation=args.use_augmentation,
+                        batch_size=args.embedding_batch_size,
+                        views=args.embedding_views,
+                        view_aggregation=view_aggregation,
+                        video_index=video_index,
+                        runtime_stats=evaluation_runtime["postprocessing"].setdefault(
+                            "train_cache", {}
+                        ),
+                    )
 
         val_embeddings = None
         test_embeddings = None
@@ -508,6 +737,7 @@ def main():
         # Cargar reporte existente para reanudar desde donde quedo (no recalcular estrategias ya guardadas)
         run_report_val = {}
         run_report_test = {}
+        postprocessing_report = {}
         report_path = os.path.join(evaluation_dir, "evaluation_report.json")
         if os.path.exists(report_path):
             try:
@@ -519,10 +749,15 @@ def main():
                 ):
                     run_report_val = existing.get("val") or {}
                     run_report_test = existing.get("test") or {}
+                    postprocessing_report = existing.get("postprocessing") or {}
                     existing_runtime = existing.get("runtime") or {}
                     for section in ("reference_generation", "embedding_caches"):
                         if existing_runtime.get(section):
                             evaluation_runtime[section] = existing_runtime[section]
+                    if args.postprocess and existing_runtime.get("postprocessing"):
+                        evaluation_runtime["postprocessing"] = existing_runtime[
+                            "postprocessing"
+                        ]
                     existing_classification = existing_runtime.get("classification") or {}
                     for split_name in ("val", "test"):
                         evaluation_runtime["classification"][split_name].update(
@@ -530,6 +765,8 @@ def main():
                         )
                     if run_report_val or run_report_test:
                         print(f"  Reanudando: {len(run_report_val)} estrategias ya evaluadas en val, {len(run_report_test)} en test.")
+                    if postprocessing_report:
+                        print("  Reanudando: post-procesamiento ya evaluado.")
                     if existing.get("best_val") and run_report_val:
                         b = existing["best_val"]
                         acc = float(b["accuracy"])
@@ -674,7 +911,54 @@ def main():
                 evaluation_dir,
                 evaluation_manifest,
                 evaluation_runtime,
+                postprocessing_report,
             )
+
+        if args.postprocess and not postprocessing_report:
+            if not train_embeddings:
+                print(
+                    "⚠ No hay embeddings del train split; no se puede ajustar "
+                    "PCA whitening. Post-procesamiento omitido para este run."
+                )
+            else:
+                references_by_strategy = {}
+                for strategy_name, ref_path in strategies:
+                    if strategy_name not in STRATEGY_NAMES:
+                        continue
+                    with np.load(ref_path, allow_pickle=False) as ref_data:
+                        references_by_strategy[strategy_name] = {
+                            label: ref_data[label] for label in ref_data.files
+                        }
+                postprocess_started = time.perf_counter()
+                postprocessing_report = evaluate_postprocessing(
+                    train_samples=train_embeddings,
+                    val_samples=val_embeddings or [],
+                    test_samples=test_embeddings or [],
+                    references_by_strategy=references_by_strategy,
+                    methods=postprocess_methods,
+                    whitening_configs=whitening_configs,
+                    reranking_configs=reranking_configs,
+                    rrf_constants=rrf_constants,
+                    seed=args.seed,
+                    fusion_strategies=configured_fusion_strategies,
+                    progress=lambda message: print(f"  {message}", flush=True),
+                )
+                evaluation_runtime["postprocessing"]["elapsed_seconds"] = (
+                    time.perf_counter() - postprocess_started
+                )
+                _print_postprocessing_summary(postprocessing_report)
+                _save_evaluation_report(
+                    run_name,
+                    args.split,
+                    run_report_val,
+                    run_report_test,
+                    evaluation_dir,
+                    evaluation_manifest,
+                    evaluation_runtime,
+                    postprocessing_report,
+                )
+        elif postprocessing_report:
+            _print_postprocessing_summary(postprocessing_report)
 
     if args.open_set:
         return
