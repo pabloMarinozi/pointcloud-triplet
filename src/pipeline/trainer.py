@@ -60,6 +60,8 @@ class TripletTrainingPipeline:
         save_sampled: bool = False,
         open_set_classes: int = 0,
         open_set_val_size: float = 0.5,
+        init_from: str | None = None,
+        freeze_lr: float | None = None,
     ):
         self._t_init = time.perf_counter()
         self.start_time = datetime.now()
@@ -268,6 +270,11 @@ class TripletTrainingPipeline:
         self.early_stopping_patience = early_stopping_patience
         self.epochs_without_improvement = 0
 
+        self.init_from = init_from
+        self.freeze_lr = freeze_lr
+        if self.freeze_lr is not None:
+            self._apply_freeze_lr()
+
         self.scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
 
         self._log(f"  [INIT] Pipeline inicializado en {time.perf_counter() - self._t_init:.1f}s", console=True)
@@ -387,6 +394,53 @@ class TripletTrainingPipeline:
         torch.save(checkpoint, self.checkpoint_last_path)
         self._log(f"[CHECKPOINT] Saved checkpoint at epoch {epoch}", console=False)
 
+    def _apply_freeze_lr(self) -> None:
+        """
+        Fuerza LR fijo (self.freeze_lr) y reemplaza el scheduler por un LambdaLR no-op.
+        Debe llamarse siempre después de crear/restaurar optimizer y scheduler,
+        para pisar cualquier LR/scheduler que haya quedado del checkpoint o del init.
+        """
+        for g in self.optimizer.param_groups:
+            g["lr"] = self.freeze_lr
+            g["initial_lr"] = self.freeze_lr
+        self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda _: 1.0)
+        self._log(
+            f"[FREEZE_LR] LR fijado en {self.freeze_lr:.3e}, scheduler deshabilitado.",
+            console=True,
+        )
+
+    def _load_init_from(self) -> None:
+        """
+        Carga solo los pesos del modelo desde self.init_from (típicamente model_best.pt).
+        No restaura optimizer, scheduler ni best_val — está pensado para arrancar un run
+        NUEVO tomando como punto de partida un modelo ya entrenado en otro run.
+        """
+        if not self.init_from or not os.path.exists(self.init_from):
+            self._log(
+                f"[INIT_FROM] Path no encontrado: {self.init_from}. Se ignora.",
+                console=True,
+            )
+            return
+        try:
+            state = torch.load(self.init_from, map_location=self.device)
+            if isinstance(state, dict) and "model_state_dict" in state:
+                # Checkpoint completo: extraer solo los pesos del modelo
+                self.model.load_state_dict(state["model_state_dict"])
+            else:
+                # state_dict del modelo (formato model_best.pt)
+                self.model.load_state_dict(state)
+            self._log(
+                f"[INIT_FROM] Pesos cargados desde {self.init_from}. "
+                f"Optimizer y scheduler quedan como al inicio (no se restauran).",
+                console=True,
+            )
+        except Exception as e:
+            self._log(
+                f"[WARNING] Falló la carga de --init_from ({self.init_from}): {e}. "
+                f"Se sigue con inicialización aleatoria.",
+                console=True,
+            )
+
     def _load_checkpoint(self) -> int | None:
         """
         Carga el checkpoint más reciente si existe.
@@ -413,6 +467,11 @@ class TripletTrainingPipeline:
                 f"best_val={self.best_val:.6f}. Continuing from epoch {start_epoch}.",
                 console=True,
             )
+
+            # Si freeze_lr está activo, re-aplicarlo porque el load pisó el LR y el scheduler.
+            if self.freeze_lr is not None:
+                self._apply_freeze_lr()
+
             return start_epoch
         except Exception as e:
             self._log(f"[WARNING] Failed to load checkpoint: {e}. Starting from scratch.", console=True)
@@ -459,9 +518,11 @@ class TripletTrainingPipeline:
         start_epoch = 1
         self._t_train_start = time.perf_counter()
 
+        resumed = False
         if resume:
             loaded_epoch = self._load_checkpoint()
             if loaded_epoch is not None:
+                resumed = True
                 start_epoch = loaded_epoch
                 if start_epoch > self.epochs:
                     self._log(
@@ -469,6 +530,11 @@ class TripletTrainingPipeline:
                         console=True,
                     )
                     return
+
+        # --init_from se aplica solo si NO se resumió (arranque de run nuevo tomando
+        # como punto de partida un modelo ya entrenado en otro run).
+        if not resumed and self.init_from:
+            self._load_init_from()
 
         monitor = self._start_monitor()
 
@@ -683,6 +749,8 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
         save_sampled: bool = False,
         open_set_classes: int = 0,
         open_set_val_size: float = 0.5,
+        init_from: str | None = None,
+        freeze_lr: float | None = None,
     ):
         from src.data.dataset import LazyTripletPointCloudDataset
 
@@ -882,6 +950,11 @@ class LazyTripletTrainingPipeline(TripletTrainingPipeline):
         self.best_val = float("inf")
         self.early_stopping_patience = early_stopping_patience
         self.epochs_without_improvement = 0
+
+        self.init_from = init_from
+        self.freeze_lr = freeze_lr
+        if self.freeze_lr is not None:
+            self._apply_freeze_lr()
 
         self.scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
 

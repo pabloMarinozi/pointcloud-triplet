@@ -90,6 +90,23 @@ def parse_args():
     )
     p.add_argument("--lazy", action="store_true", help="Usar lazy loading: las nubes se leen del disco en cada __getitem__. Por defecto (--eager) se precargan todas en RAM.")
     p.add_argument("--save_sampled", action="store_true", help="Guardar los puntos sampleados como .ply en experiments/sampling/<run>+<archivo>.")
+    p.add_argument(
+        "--init_from",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path a un state_dict del modelo (típicamente runs/<run>/model_best.pt) para arrancar. "
+             "Solo se cargan los pesos; optimizer/scheduler/best_val NO se restauran. "
+             "Se ignora si --resume encuentra checkpoint_last.pt en el run actual.",
+    )
+    p.add_argument(
+        "--freeze_lr",
+        type=float,
+        default=None,
+        metavar="LR",
+        help="Si se pasa, deshabilita el scheduler y usa este LR fijo durante todo el entrenamiento. "
+             "Útil para fine-tuning tras un cosine annealing.",
+    )
 
     return p.parse_args()
 
@@ -143,6 +160,8 @@ def main():
         save_sampled=args.save_sampled,
         open_set_classes=args.open_set_classes,
         open_set_val_size=args.open_set_val_size,
+        init_from=args.init_from,
+        freeze_lr=args.freeze_lr,
     )
     pipe_init_s = time.perf_counter() - t_pipe
     ts_print(f"Pipeline listo en {pipe_init_s:.1f}s")
